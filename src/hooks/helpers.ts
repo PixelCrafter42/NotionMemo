@@ -16,13 +16,14 @@ import { spawn, execFileSync } from "node:child_process"
 import { tmpdir, homedir } from "node:os"
 import { join } from "node:path"
 import { resolve, relative } from "node:path"
-import { findConfigFile, loadConfig } from "../config.js"
+import { findConfigFile, loadConfigAllowingInvalidHooks } from "../config.js"
 import {
   formatTranscriptSessionContent,
   inspectTranscript,
 } from "./transcript.js"
-import { initServices } from "../services.js"
-import { TRACKING_PREDICATES } from "../types.js"
+import { initServicesFromConfig } from "../services.js"
+import { TRACKING_PREDICATES, type LoreConfig } from "../types.js"
+import { mergeHookDefaults, type HookConfig } from "./config.js"
 
 const action = process.argv[2]
 
@@ -35,8 +36,6 @@ interface HookEvent {
   last_assistant_message?: string
   stop_hook_active?: boolean
 }
-
-const DEFAULT_SAVE_INTERVAL = 5
 
 function buildSavePrompt(projectName: string | null): string {
   const scope = projectName ? `the "${projectName}" project` : "this project"
@@ -96,12 +95,6 @@ async function writeSaveCount(
 // Config
 // ---------------------------------------------------------------------------
 
-interface HookConfig {
-  saveInterval: number
-  autoSave: boolean
-  projectName: string | null
-}
-
 /**
  * Lightweight project name resolution from .lore.yaml — no Notion API calls.
  * Mirrors resolveProject's longest-prefix logic from core/context.ts.
@@ -136,26 +129,53 @@ function resolveProjectName(
   return bestName
 }
 
-async function loadHookConfig(): Promise<HookConfig> {
-  const defaults: HookConfig = {
-    saveInterval: DEFAULT_SAVE_INTERVAL,
-    autoSave: true,
-    projectName: null,
+interface HookState {
+  hookConfig: HookConfig
+  config: LoreConfig | null
+  configRoot: string | null
+}
+
+function reportHookConfigWarnings(configPath: string, warnings: string[]): void {
+  if (warnings.length === 0) return
+
+  const displayPath = configPath.replace(homedir(), "~")
+  process.stderr.write(`[lore] Recovered ${displayPath} with hook defaults.\n`)
+  for (const warning of warnings) {
+    const formatted = warning.trimEnd().split("\n").join("\n[lore]   ")
+    process.stderr.write(`[lore]   ${formatted}\n`)
   }
+}
+
+async function loadHookState(): Promise<HookState> {
   const found = await findConfigFile(process.cwd())
-  if (!found) return defaults
-  try {
-    const config = await loadConfig(found.path)
+  if (!found) {
     return {
-      saveInterval: config.hooks?.saveInterval ?? defaults.saveInterval,
-      autoSave: config.hooks?.autoSave ?? defaults.autoSave,
-      projectName: resolveProjectName(process.cwd(), found.root, config.projects),
+      hookConfig: mergeHookDefaults(undefined),
+      config: null,
+      configRoot: null,
+    }
+  }
+
+  try {
+    const { config, warnings } = await loadConfigAllowingInvalidHooks(found.path)
+    reportHookConfigWarnings(found.path, warnings)
+    return {
+      hookConfig: mergeHookDefaults(
+        config.hooks,
+        resolveProjectName(process.cwd(), found.root, config.projects),
+      ),
+      config,
+      configRoot: found.root,
     }
   } catch (err) {
     process.stderr.write(
       `[lore] Failed to load ${found.path}: ${err instanceof Error ? err.message : err}. Using hook defaults.\n`,
     )
-    return defaults
+    return {
+      hookConfig: mergeHookDefaults(undefined),
+      config: null,
+      configRoot: null,
+    }
   }
 }
 
@@ -198,7 +218,7 @@ async function autosave(): Promise<void> {
   }
 
   // Config opt-out: hooks.autoSave: false in .lore.yaml
-  const hookConfig = await loadHookConfig()
+  const { hookConfig } = await loadHookState()
   if (!hookConfig.autoSave) {
     process.stdout.write("{}\n")
     return
@@ -291,9 +311,16 @@ function dateBucket(isoDate: string): "Today" | "Yesterday" | "Earlier" {
 }
 
 async function wakeup(): Promise<void> {
-  let services: Awaited<ReturnType<typeof initServices>>
+  // Config opt-out: hooks.wakeUp: false suppresses context injection.
+  // Check before service initialization so we avoid the Notion round-trip when disabled.
+  const hookState = await loadHookState()
+  const { hookConfig } = hookState
+  if (!hookConfig.wakeUp) return
+  if (!hookState.config || !hookState.configRoot) return
+
+  let services: Awaited<ReturnType<typeof initServicesFromConfig>>
   try {
-    services = await initServices()
+    services = await initServicesFromConfig(process.cwd(), hookState.configRoot, hookState.config)
   } catch {
     // Missing config or auth is normal (not every project has Lore).
     // Exit silently rather than producing a hook error.
@@ -506,7 +533,7 @@ async function handleSessionEnd(): Promise<void> {
   const raw = process.env["LORE_SESSION_END_CONTENT"]
   if (!raw) return
 
-  const hookConfig = await loadHookConfig()
+  const { hookConfig } = await loadHookState()
   if (!hookConfig.autoSave) return
 
   let event: HookEvent
