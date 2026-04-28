@@ -1392,6 +1392,7 @@ export function pageToMemory(page: PageObjectResponse, content?: string): Memory
     status: extractSelect(props["Status"], "informational") as MemoryStatus,
     confidence: extractSelect(props["Confidence"], "certain") as MemoryConfidence,
     reviewBy: extractDate(props["Review By"]),
+    doneAt: extractDate(props["Done At"]),
     decidedAt: extractDate(props["Decided At"]),
     supersedesIds: extractRelationIds(props["Supersedes"]),
     affectsIds: extractRelationIds(props["Affects"]),
