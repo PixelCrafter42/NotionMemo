@@ -33,6 +33,7 @@ function buildMemory(overrides: Partial<Memory> & { id: string; title: string })
     reviewBy: null,
     doneAt: null,
     decidedAt: null,
+    lastReferencedAt: null,
     supersedesIds: [],
     affectsIds: [],
     alternatives: "",

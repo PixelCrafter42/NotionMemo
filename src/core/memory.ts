@@ -406,6 +406,7 @@ export class MemoryService {
         confidenceScore: input.confidenceScore,
         reviewBy: input.reviewBy,
         decidedAt: input.decidedAt,
+        lastReferencedAt: input.lastReferencedAt,
         supersedesIds: input.supersedesIds,
         affectsIds: input.affectsIds,
         alternatives: decoded.alternatives,
@@ -614,15 +615,21 @@ export class MemoryService {
           : { number: input.confidenceScore }
     }
     // `null` explicitly clears a date; `undefined` leaves it untouched.
+    // Strict `=== null` matches `buildMemoryProps`' shape so update and
+    // create use one consistent rule for "is this a clear or a set?"
     if (input.reviewBy !== undefined) {
-      props["Review By"] = input.reviewBy
-        ? { date: { start: input.reviewBy } }
-        : { date: null }
+      props["Review By"] =
+        input.reviewBy === null ? { date: null } : { date: { start: input.reviewBy } }
     }
     if (input.decidedAt !== undefined) {
-      props["Decided At"] = input.decidedAt
-        ? { date: { start: input.decidedAt } }
-        : { date: null }
+      props["Decided At"] =
+        input.decidedAt === null ? { date: null } : { date: { start: input.decidedAt } }
+    }
+    if (input.lastReferencedAt !== undefined) {
+      props["Last Referenced At"] =
+        input.lastReferencedAt === null
+          ? { date: null }
+          : { date: { start: input.lastReferencedAt } }
     }
     if (input.supersedesIds) {
       props["Supersedes"] = { relation: input.supersedesIds.map((id) => ({ id })) }
@@ -1447,6 +1454,7 @@ export function pageToMemory(page: PageObjectResponse, content?: string): Memory
     reviewBy: extractDate(props["Review By"]),
     doneAt: extractDate(props["Done At"]),
     decidedAt: extractDate(props["Decided At"]),
+    lastReferencedAt: extractDate(props["Last Referenced At"]),
     supersedesIds: extractRelationIds(props["Supersedes"]),
     affectsIds: extractRelationIds(props["Affects"]),
     alternatives: extractRichText(props["Alternatives"]),

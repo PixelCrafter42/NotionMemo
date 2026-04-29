@@ -320,6 +320,19 @@ export interface Memory {
    */
   doneAt: string | null
   decidedAt: string | null
+  /**
+   * Most-recent read-citation date in `YYYY-MM-DD` form; `null` until the
+   * memory has been touched once by a read path (or backfilled by
+   * `lore migrate --build-confidence-scores`, #11). Distinct from
+   * `updatedAt` (Notion built-in, edit timestamp) and from `createdAt`
+   * (Notion built-in, creation timestamp).
+   *
+   * Decay (#03) reads this; the stale-confidence wake-up subsection (#10)
+   * reads this. RRF (#08) does NOT read this directly — the decay
+   * function mediates between `lastReferencedAt` and the confidence
+   * score.
+   */
+  lastReferencedAt: string | null
   supersedesIds: string[]
   affectsIds: string[]
   alternatives: string
@@ -384,6 +397,12 @@ export interface CreateMemoryInput {
   confidenceScore?: number | null
   reviewBy?: string
   decidedAt?: string
+  /**
+   * Service-layer-only field. Not exposed on the MCP tool surface — the
+   * column is system-managed by `MemoryService.touchOnRead` (#03) and the
+   * `--build-confidence-scores` migration (#11), not by agents.
+   */
+  lastReferencedAt?: string
   supersedesIds?: string[]
   affectsIds?: string[]
   alternatives?: string
@@ -433,6 +452,14 @@ export interface UpdateMemoryInput {
   confidenceScore?: number | null
   reviewBy?: string | null
   decidedAt?: string | null
+  /**
+   * Service-layer-only field. Pass `null` to clear; `undefined` (the
+   * default) leaves the column untouched. Not exposed on the MCP tool
+   * surface — `Last Referenced At` is system-managed by
+   * `MemoryService.touchOnRead` (#03) and the `--build-confidence-scores`
+   * migration (#11).
+   */
+  lastReferencedAt?: string | null
   supersedesIds?: string[]
   affectsIds?: string[]
   alternatives?: string
