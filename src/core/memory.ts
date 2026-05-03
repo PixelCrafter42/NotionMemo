@@ -2296,7 +2296,9 @@ export class MemoryService {
    * `memory-encoding.ts` so the CLI doesn't need to reach past the
    * service boundary for the client + DatabaseRef.
    */
-  async fixEncoding(options: { dryRun?: boolean } = {}): Promise<MemoryEncodingReport> {
+  async fixEncoding(
+    options: { dryRun?: boolean; projectId?: string } = {}
+  ): Promise<MemoryEncodingReport> {
     return fixMemoryEncoding(this.client, this.db, options)
   }
 
@@ -2308,7 +2310,7 @@ export class MemoryService {
    * DatabaseRef.
    */
   async normalizeAgents(
-    options: { dryRun?: boolean } = {}
+    options: { dryRun?: boolean; projectId?: string } = {}
   ): Promise<AgentNormalizationReport> {
     return normalizeAgents(this.client, this.db, options)
   }
