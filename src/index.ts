@@ -35,7 +35,6 @@ export type {
   PromotionTargetConfig,
   ResolvedContext,
   UpstreamVaultConfig,
-  UpstreamVaultMode,
 } from "./types.js"
 
 export { findConfigFile, loadConfig, resolveToken, resolveAuth } from "./config.js"
@@ -94,7 +93,6 @@ export {
 } from "./core/context.js"
 export type { ProjectResolution } from "./core/context.js"
 export {
-  DEFAULT_UPSTREAM_MODE,
   DEFAULT_UPSTREAM_PRIORITY,
   buildVaultTopology,
   hasConfiguredTopology,
