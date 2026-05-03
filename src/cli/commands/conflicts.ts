@@ -30,6 +30,7 @@ import {
 import { dynamicCodeFence } from "../../core/markdown.js"
 import { CONFLICT_JUDGE_PROMPT_VERSION } from "../../core/prompts/conflict-judge.js"
 import type { Memory } from "../../types.js"
+import { parsePositiveDecimalInteger } from "../parse.js"
 
 /**
  * Default raw-candidate cap passed into `findConflictCandidates`.
@@ -98,39 +99,6 @@ export function parseScanCliOptions(raw: {
       exhaustive: !!raw.exhaustive,
     },
   }
-}
-
-/**
- * Validate a positive decimal integer flag BEFORE numeric conversion.
- * Looser approaches each silently accept malformed values:
- * `parseInt("3.7", 10)` floors, `parseInt("3abc", 10)` truncates,
- * `Number("1e3")` accepts exponent notation, and `Number("+5")`
- * accepts a leading sign. The raw string check keeps CLI flags strict.
- */
-function parsePositiveDecimalInteger(
-  flag: string,
-  raw: string
-): { ok: true; value: number } | { ok: false; message: string } {
-  if (!/^[0-9]+$/.test(raw)) {
-    return {
-      ok: false,
-      message: `${flag} must be a positive decimal integer, got "${raw}"`,
-    }
-  }
-  const n = Number(raw)
-  if (n < 1) {
-    return {
-      ok: false,
-      message: `${flag} must be a positive integer, got ${n}`,
-    }
-  }
-  if (!Number.isSafeInteger(n)) {
-    return {
-      ok: false,
-      message: `${flag} exceeds the safe integer range, got "${raw}"`,
-    }
-  }
-  return { ok: true, value: n }
 }
 
 /** Per-pair output shape, shared by markdown and JSON renderers. */
