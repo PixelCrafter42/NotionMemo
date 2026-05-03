@@ -196,6 +196,27 @@ auth:
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it("rejects starter page ID placeholders before Notion calls", () => {
+    expect(() =>
+      parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: "<your-vault-page-id>"
+`),
+    ).toThrow(/starter placeholder/)
+  })
+
+  it("rejects placeholder page IDs in named vault references", () => {
+    expect(() =>
+      parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: primary-vault
+upstreamVaults:
+  - name: Engineering
+    pageId: "<engineering-vault-page-id>"
+`),
+    ).toThrow(/starter placeholder/)
+  })
 })
 
 describe("committed .lore.yaml", () => {
@@ -211,6 +232,10 @@ describe("committed .lore.yaml", () => {
     expect(parsed.auth?.token).toBeUndefined()
     expect(pageId).toBe("343b35e6e67f81a0afa9c9801b35199f")
     expect(serializedConfig).not.toMatch(/ntn_|secret_/)
+  })
+
+  it("fails fast at config load time until the placeholder is replaced", async () => {
+    await expect(loadConfig(".lore.yaml")).rejects.toThrow(/starter placeholder/)
   })
 })
 
