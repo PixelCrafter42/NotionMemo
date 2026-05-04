@@ -866,3 +866,358 @@ describe("ensurePrerequisites — env-aware preflight-failure recovery", () => {
     expect(err).not.toMatch(/NOTION_ENV=/)
   })
 })
+
+describe("ensurePrerequisites — Notion environment display", () => {
+  // The `Notion environment:` line is driven by the resolved auth's
+  // `baseUrl` because that struct is what `createClient` consumes —
+  // displaying anything else lies about what the spawned MCP child
+  // will actually resolve. The annotation names where that runtime
+  // value came from:
+  //
+  //   - shell env wins for all auth sources (operator-controlled).
+  //   - `ntn-auth-json` otherwise reads ntn's `~/.config/notion/config.json`.
+  //   - `env-notion-api-token` is shell-only.
+  //   - legacy paths honor `.lore.yaml auth.baseUrl` directly.
+  //
+  // The mismatch warning catches the silent footgun where canonical
+  // auth resolves to one deployment but `.lore.yaml auth.baseUrl`
+  // declares another — `resolveAuth` intentionally ignores
+  // `auth.baseUrl` on canonical paths for security (a checked-in
+  // `.lore.yaml: auth.baseUrl: https://attacker.example` could
+  // otherwise redirect a bearer token; see `src/config.ts:340-349`).
+  //
+  // Keep the PRIOR_ENV map below in lockstep with
+  // `describeBaseUrlSource`'s shell-var checks in `install.ts` —
+  // adding a new shell signal there without snapshotting it here
+  // leaks state between tests.
+
+  const PRIOR_ENV: Record<string, string | undefined> = {
+    NOTION_ENV: process.env["NOTION_ENV"],
+    LORE_NOTION_BASE_URL: process.env["LORE_NOTION_BASE_URL"],
+    NOTION_BASE_URL: process.env["NOTION_BASE_URL"],
+    NOTION_API_BASE_URL: process.env["NOTION_API_BASE_URL"],
+  }
+
+  beforeEach(() => {
+    vi.mocked(isNtnInstalled).mockReturnValue(true)
+    vi.mocked(checkNtnVersion).mockReturnValue("ok")
+    vi.mocked(getNtnVersion).mockReturnValue("0.12.0")
+    vi.mocked(verifyVaultAccess).mockResolvedValue({ kind: "ok", pageTitle: "Vault" })
+    for (const key of Object.keys(PRIOR_ENV)) {
+      delete process.env[key]
+    }
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+    consoleLogSpy.mockClear()
+    consoleWarnSpy.mockClear()
+    consoleErrorSpy.mockClear()
+    for (const [key, value] of Object.entries(PRIOR_ENV)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  })
+
+  it("displays the env mapped from auth.baseUrl with (from ntn config.json) for ntn-resolved auth", async () => {
+    // ntn-resolved with a dev baseUrl that came from ntn's
+    // `config.json` (the operator ran `NOTION_ENV=dev ntn login`).
+    // Display reflects the runtime baseUrl; annotation names ntn's
+    // config.json as the source.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/dev-project/.lore.yaml",
+      root: "/tmp/dev-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({ vault: { pageId: "dev-page" } } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+      baseUrl: "https://api-dev.notion.com",
+    })
+
+    const result = await ensurePrerequisites(makeContext(), { yes: true })
+
+    expect(result.ready).toBe(true)
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+dev \(from ntn config\.json\)/)
+  })
+
+  it("displays prod (ntn default) when ntn-resolved auth.baseUrl is undefined", async () => {
+    // `resolveNtnBaseUrl` returns `undefined` for prod (intentional;
+    // prod is the SDK default). Pre-fix the line was suppressed;
+    // post-fix the operator sees the explicit "prod" target so
+    // there's no doubt about which deployment the install will hit.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/prod-project/.lore.yaml",
+      root: "/tmp/prod-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({ vault: { pageId: "page" } } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(
+      /Notion environment:\s+prod \(ntn default; no shell or ntn config\.json override\)/,
+    )
+  })
+
+  it("warns when .lore.yaml auth.baseUrl declares a target the canonical auth source ignores (the silent footgun)", async () => {
+    // The bug-repro under the corrected contract: operator's
+    // `.lore.yaml` says dev, but ntn-resolved auth landed on prod
+    // (operator ran `ntn login` without `NOTION_ENV=dev`). Display
+    // is honest about the runtime (prod), AND the warning names the
+    // mismatch and the actionable fix. Without this surface the
+    // operator hits a generic "vault not accessible" trail with no
+    // signal that `.lore.yaml` was silently dropped.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/dev-project/.lore.yaml",
+      root: "/tmp/dev-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "dev-page" },
+      auth: { baseUrl: "https://api-dev.notion.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+prod \(ntn default;/)
+    expect(out).toMatch(
+      /! \.lore\.yaml declares auth\.baseUrl=dev but resolved auth targets prod/,
+    )
+    expect(out).toMatch(/ntn's config\.json/)
+    expect(out).toMatch(/set NOTION_ENV in your shell/)
+  })
+
+  it("warns when env-notion-api-token resolves prod and .lore.yaml declares dev", async () => {
+    // Same security contract as ntn-auth-json — `auth.baseUrl` is
+    // intentionally ignored on `env-notion-api-token` per
+    // `src/config.ts:357-358`. The mismatch warning fires for this
+    // path too, with a different `sourceHint` reflecting the API
+    // token environment as the runtime origin.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/dev-project/.lore.yaml",
+      root: "/tmp/dev-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "dev-page" },
+      auth: { baseUrl: "https://api-dev.notion.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "env-notion-api-token",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+prod \(default; no shell base-URL override\)/)
+    expect(out).toMatch(/! \.lore\.yaml declares auth\.baseUrl=dev/)
+    expect(out).toMatch(/the NOTION_API_TOKEN environment/)
+  })
+
+  it("does NOT warn when .lore.yaml auth.baseUrl matches resolved via the .com prod alias", async () => {
+    // `https://api.notion.com` aliases to prod via
+    // `NTN_ENV_BASE_URL_ALIASES`; resolved is also prod (default).
+    // The two map to the same canonical env so the mismatch
+    // warning suppresses — pinning the canonical-mapping collapse
+    // so a future alias-table change can't silently regress to a
+    // false-positive warning on the migration window.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/prod-project/.lore.yaml",
+      root: "/tmp/prod-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "prod-page" },
+      auth: { baseUrl: "https://api.notion.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+prod \(ntn default;/)
+    expect(out).not.toMatch(/declares auth\.baseUrl=/)
+  })
+
+  it("annotates (from shell LORE_NOTION_BASE_URL) when the shell base-URL var is set, and suppresses any mismatch warning", async () => {
+    // Operator explicitly steered the runtime via a shell base-URL
+    // var. The annotation names the var so an operator who forgot
+    // it was set in a stale shell rc can see why the inference is
+    // overridden, and the mismatch warning suppresses because this
+    // is no longer a silent footgun.
+    process.env["LORE_NOTION_BASE_URL"] = "https://api-dev.notion.com"
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/prod-project/.lore.yaml",
+      root: "/tmp/prod-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "prod-page" },
+      auth: { baseUrl: "https://api.notion.so" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+      baseUrl: "https://api-dev.notion.com",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+dev \(from shell LORE_NOTION_BASE_URL\)/)
+    expect(out).not.toMatch(/declares auth\.baseUrl=/)
+  })
+
+  it("does not annotate NOTION_ENV nor suppress the mismatch warning when NOTION_ENV is unparseable", async () => {
+    // `resolveOperatorBaseUrl` only honors `NOTION_ENV` values that
+    // `ntnEnvBaseUrl` recognizes; a typo like `NOTION_ENV=devv` does
+    // NOT drive the runtime baseUrl. The display must reflect that:
+    // attribute the resolved value to its actual source (the
+    // auth-source-specific resolver) and keep the mismatch warning
+    // eligible so the silent-footgun surface this PR exists to
+    // expose isn't silenced by garbage shell input. Without this
+    // gate, an operator with a typo'd `NOTION_ENV` and a dev-pinned
+    // `.lore.yaml` against a prod ntn login would see
+    // `prod (from shell NOTION_ENV=devv)` with no warning — strictly
+    // worse than the pre-PR no-line behavior.
+    process.env["NOTION_ENV"] = "devv"
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/typo-project/.lore.yaml",
+      root: "/tmp/typo-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "page" },
+      auth: { baseUrl: "https://api-dev.notion.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+prod \(ntn default;/)
+    expect(out).not.toMatch(/from shell NOTION_ENV=/)
+    expect(out).toMatch(
+      /! \.lore\.yaml declares auth\.baseUrl=dev but resolved auth targets prod/,
+    )
+  })
+
+  it("annotates (from shell NOTION_ENV=...) when only NOTION_ENV is set", async () => {
+    // `NOTION_ENV` is the lowest-priority shell signal; it falls
+    // through `resolveOperatorBaseUrl`'s chain to `ntnEnvBaseUrl`.
+    // The annotation includes the literal value so an operator
+    // sees what's pinned without having to grep their shell rc.
+    process.env["NOTION_ENV"] = "stg"
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/stg-project/.lore.yaml",
+      root: "/tmp/stg-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({ vault: { pageId: "stg-page" } } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+      baseUrl: "https://api-stg.notion.com",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+stg \(from shell NOTION_ENV=stg\)/)
+  })
+
+  it("annotates (from .lore.yaml auth.baseUrl) for legacy auth source, with no mismatch warning", async () => {
+    // Legacy paths (`env-lore-notion-token` / `config-auth-token`)
+    // honor `auth.baseUrl` directly via `legacyBaseUrlOverride`, so
+    // the annotation names `.lore.yaml` as the runtime source and
+    // the mismatch warning is structurally impossible (resolved
+    // baseUrl == config baseUrl by construction).
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/legacy-project/.lore.yaml",
+      root: "/tmp/legacy-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "legacy-page" },
+      auth: { baseUrl: "https://api-dev.notion.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "env-lore-notion-token",
+      baseUrl: "https://api-dev.notion.com",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+dev \(from \.lore\.yaml auth\.baseUrl\)/)
+    expect(out).not.toMatch(/declares auth\.baseUrl=/)
+  })
+
+  it("displays a non-canonical resolved baseUrl with the URL itself rather than mapping it to an env", async () => {
+    // Corporate-proxy / unknown deployment URLs that
+    // `ntnEnvFromBaseUrl` can't recognize. Surface the URL itself
+    // tagged `non-canonical` so the operator sees what's pinned
+    // even though Lore can't name the env.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/corp-project/.lore.yaml",
+      root: "/tmp/corp-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "corp-page" },
+      auth: { baseUrl: "https://notion.corp.example.com" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "env-lore-notion-token",
+      baseUrl: "https://notion.corp.example.com",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(
+      /Notion environment:\s+https:\/\/notion\.corp\.example\.com \(from \.lore\.yaml auth\.baseUrl\), non-canonical/,
+    )
+  })
+
+  it("treats empty-string .lore.yaml auth.baseUrl as no signal (no mismatch warning)", async () => {
+    // Defensive pin against a future refactor that switches to a
+    // strict `!== undefined` check on the config baseUrl probe.
+    // The Zod schema for `auth.baseUrl` allows any URL string, but
+    // an empty string slipping through must NOT fire the mismatch
+    // warning with a `(non-canonical)` empty-URL message.
+    vi.mocked(findConfigFile).mockResolvedValue({
+      path: "/tmp/prod-project/.lore.yaml",
+      root: "/tmp/prod-project",
+    })
+    vi.mocked(loadConfig).mockResolvedValue({
+      vault: { pageId: "prod-page" },
+      auth: { baseUrl: "" },
+    } as never)
+    vi.mocked(resolveAuth).mockResolvedValue({
+      token: "tok",
+      source: "ntn-auth-json",
+    })
+
+    await ensurePrerequisites(makeContext(), { yes: true })
+
+    const out = captured(consoleLogSpy)
+    expect(out).toMatch(/Notion environment:\s+prod \(ntn default;/)
+    expect(out).not.toMatch(/declares auth\.baseUrl=/)
+  })
+})
