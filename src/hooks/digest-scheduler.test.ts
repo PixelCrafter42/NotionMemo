@@ -32,6 +32,7 @@ import {
   listBackgroundFailures,
   recordBackgroundFailure,
 } from "./background-failure-marker.js"
+import { withClearedRuntimeEnv } from "./test-utils.js"
 import type { LoreServices } from "../services.js"
 import type { LoreConfig, Project } from "../types.js"
 
@@ -648,26 +649,19 @@ describe("scheduleAutoDigestSpawn", () => {
     // here so a future refactor that drops the explicit `env:`
     // option (or forgets to thread `authSource` through) fails
     // loudly rather than silently re-introducing the leak.
-    let savedTokens: { api: string | undefined; lore: string | undefined }
+    const envGuard = withClearedRuntimeEnv([
+      "NOTION_API_TOKEN",
+      "LORE_NOTION_TOKEN",
+      "NOTION_WORKSPACE_ID",
+      "LORE_NOTION_BASE_URL",
+    ] as const)
 
     beforeEach(() => {
-      savedTokens = {
-        api: process.env["NOTION_API_TOKEN"],
-        lore: process.env["LORE_NOTION_TOKEN"],
-      }
+      envGuard.install()
     })
 
     afterEach(() => {
-      if (savedTokens.api === undefined) {
-        delete process.env["NOTION_API_TOKEN"]
-      } else {
-        process.env["NOTION_API_TOKEN"] = savedTokens.api
-      }
-      if (savedTokens.lore === undefined) {
-        delete process.env["LORE_NOTION_TOKEN"]
-      } else {
-        process.env["LORE_NOTION_TOKEN"] = savedTokens.lore
-      }
+      envGuard.restore()
     })
 
     it("under authSource=ntn-auth-json, drops auth tokens from the helper child's inherited env", () => {
@@ -729,16 +723,24 @@ describe("scheduleAutoDigestSpawn", () => {
       const options = spawnMock.mock.calls[0]![2] as {
         env: NodeJS.ProcessEnv
       }
-      // Non-ntn sources receive `process.env` unmodified — the
-      // helper SHARES the parent's env reference. Identity check
-      // via equal token presence is enough.
+      // Non-ntn sources receive a fresh shallow copy of
+      // `process.env` (NOT the live reference — see the
+      // `buildAutoDigestHelperEnv` describe block below for the
+      // identity-inequality + mutation-isolation pins). Token
+      // contents are preserved byte-for-byte; only the object
+      // reference differs.
       expect(options.env["NOTION_API_TOKEN"]).toBe("secret_canonical")
     })
 
-    it("with authSource omitted, preserves pre-#475 default-inheritance behavior", () => {
-      // Test fixtures, ad-hoc invocations, and any caller whose
-      // foreground hasn't resolved auth land here. The helper
-      // returns `process.env` unmodified.
+    it("with authSource omitted, preserves pre-#475 inheritance behavior AND passes env explicitly", () => {
+      // Two contracts pinned here: (1) test fixtures and ad-hoc
+      // invocations preserve pre-#475 token forwarding; (2) the
+      // `env` field is ALWAYS passed explicitly to `child_process.spawn`,
+      // never falling back to Node's default-inherit shape that
+      // masked the original blocking-review leak. A future refactor
+      // that "optimizes" the omitted-authSource path by dropping the
+      // `env:` option (relying on Node default) would silently re-
+      // introduce the leak class — pin both halves here.
       process.env["LORE_NOTION_TOKEN"] = "secret_legacy_lore"
       spawnMock.mockReset()
       spawnMock.mockReturnValue(fakeChild())
@@ -748,6 +750,10 @@ describe("scheduleAutoDigestSpawn", () => {
       const options = spawnMock.mock.calls[0]![2] as {
         env: NodeJS.ProcessEnv
       }
+      // Explicit-env-passed contract: `env` MUST be present in the
+      // spawn options (not relying on Node default inherit).
+      expect(options.env).toBeDefined()
+      // Token preservation: pre-#475 behavior unchanged.
       expect(options.env["LORE_NOTION_TOKEN"]).toBe("secret_legacy_lore")
     })
 
@@ -756,14 +762,51 @@ describe("scheduleAutoDigestSpawn", () => {
       // regression in just the env-shape logic surfaces independently
       // of the broader spawn wiring above.
 
-      it("returns process.env unmodified for non-ntn sources", () => {
+      it("returns a fresh copy (NOT the live process.env reference) for non-ntn sources", () => {
+        // Symmetry with the ntn-source branch (review iteration 3
+        // Suggestion 3): both branches return a shallow copy so a
+        // downstream caller-side mutation can't silently leak into
+        // process.env. Pin the copy semantics here so a future
+        // refactor that "optimizes" the non-ntn branch back to a
+        // direct return fails the assertion rather than re-introducing
+        // the footgun class.
         const env = buildAutoDigestHelperEnv("env-notion-api-token")
-        expect(env).toBe(process.env)
+        expect(env).not.toBe(process.env)
       })
 
-      it("returns process.env unmodified for omitted authSource", () => {
+      it("returns a fresh copy for omitted authSource", () => {
         const env = buildAutoDigestHelperEnv(undefined)
-        expect(env).toBe(process.env)
+        expect(env).not.toBe(process.env)
+      })
+
+      it("preserves every parent env var for non-ntn sources", () => {
+        process.env["NOTION_API_TOKEN"] = "secret_canonical"
+        process.env["LORE_NOTION_TOKEN"] = "secret_legacy_lore"
+        try {
+          const env = buildAutoDigestHelperEnv("env-notion-api-token")
+          // Auth tokens stay forwarded under non-ntn sources — those
+          // callers' `resolveAuth` priority chain reaches the bearer
+          // only through env.
+          expect(env["NOTION_API_TOKEN"]).toBe("secret_canonical")
+          expect(env["LORE_NOTION_TOKEN"]).toBe("secret_legacy_lore")
+        } finally {
+          delete process.env["NOTION_API_TOKEN"]
+          delete process.env["LORE_NOTION_TOKEN"]
+        }
+      })
+
+      it("mutations on the returned env do NOT propagate to process.env", () => {
+        // Symmetry contract with the ntn-source branch: a caller
+        // adding a child-only var via `env.SOMETHING = "..."` must
+        // not leak into the parent. The shallow copy is what makes
+        // this safe.
+        const env = buildAutoDigestHelperEnv(undefined)
+        env["LORE_TEST_CHILD_ONLY_VAR"] = "child-only"
+        try {
+          expect(process.env["LORE_TEST_CHILD_ONLY_VAR"]).toBeUndefined()
+        } finally {
+          delete env["LORE_TEST_CHILD_ONLY_VAR"]
+        }
       })
 
       it("returns a copy with auth tokens removed for ntn-auth-json", () => {

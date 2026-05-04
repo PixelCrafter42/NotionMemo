@@ -459,13 +459,21 @@ async function clearStopFailure(
  * operator would see a stderr nag at hook cadence rather than the
  * intended once-per-warning-window cadence.
  *
- * Cost: one extra `auth.json` read on every Stop fire for ntn-source
- * operators (the spawned child reads it again at its own startup).
- * `loadNtnToken` is a single small-file `readFile` plus dynamic
- * import (cached after first call); negligible for the Stop hot
- * path's "in-the-millisecond" budget. Non-ntn sources don't pay the
- * disk read — they short-circuit at priority 1 (`NOTION_API_TOKEN`)
- * or fall through priority 3/4 with no I/O.
+ * Cost reflects `resolveAuth`'s priority walk (see `src/config.ts`):
+ * `NOTION_API_TOKEN`-source operators short-circuit at priority 1
+ * with zero I/O; `ntn-auth-json`, `LORE_NOTION_TOKEN`, and
+ * `config-auth-token` operators all pay the priority-2 `auth.json`
+ * `readFile` plus dynamic import of `auth/ntn.js` because the walk
+ * checks priority 2 BEFORE falling through to the legacy env / repo
+ * sources. `LORE_NOTION_TOKEN` and `config-auth-token` operators
+ * then continue to priorities 3/4 after the priority-2 miss; only
+ * the `NOTION_API_TOKEN` path avoids any I/O. `loadNtnToken`'s
+ * dynamic import is cached after the first call (rarely matters
+ * since `lore hooks autosave` is a fresh process per Stop), and the
+ * read itself is a single small-file `readFile` — negligible for
+ * the Stop hot path's "in-the-millisecond" budget. Stays in sync
+ * with `src/hooks/AGENTS.md`'s "Two-process split is load-bearing"
+ * addendum; if you change one, change both.
  *
  * Exported for unit-test coverage of the four-branch failure matrix
  * (no failureContext, null config, resolveAuth rejection, success);

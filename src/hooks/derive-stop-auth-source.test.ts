@@ -67,6 +67,7 @@ vi.mock("../auth/ntn.js", async () => {
 })
 
 import { deriveStopAuthSource, type StopFailureContext } from "./helpers.js"
+import { withClearedRuntimeEnv } from "./test-utils.js"
 import type { LoreConfig } from "../types.js"
 
 const BASE_CONFIG: LoreConfig = {
@@ -83,14 +84,10 @@ function ctx(overrides: Partial<StopFailureContext> = {}): StopFailureContext {
 }
 
 describe("deriveStopAuthSource — failure branches preserve every-key forward", () => {
-  let savedEnv: Partial<Record<(typeof AUTH_ENV_KEYS)[number], string | undefined>>
+  const envGuard = withClearedRuntimeEnv(AUTH_ENV_KEYS)
 
   beforeEach(() => {
-    savedEnv = {}
-    for (const key of AUTH_ENV_KEYS) {
-      savedEnv[key] = process.env[key]
-      delete process.env[key]
-    }
+    envGuard.install()
     loadNtnTokenMock.mockReset()
     loadNtnTokenMock.mockResolvedValue(null)
     listNtnWorkspacesMock.mockReset()
@@ -98,14 +95,7 @@ describe("deriveStopAuthSource — failure branches preserve every-key forward",
   })
 
   afterEach(() => {
-    for (const key of AUTH_ENV_KEYS) {
-      const prior = savedEnv[key]
-      if (prior === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = prior
-      }
-    }
+    envGuard.restore()
   })
 
   it("returns undefined when failureContext is undefined", async () => {
@@ -152,14 +142,10 @@ describe("deriveStopAuthSource — failure branches preserve every-key forward",
 })
 
 describe("deriveStopAuthSource — success branches return the resolved source", () => {
-  let savedEnv: Partial<Record<(typeof AUTH_ENV_KEYS)[number], string | undefined>>
+  const envGuard = withClearedRuntimeEnv(AUTH_ENV_KEYS)
 
   beforeEach(() => {
-    savedEnv = {}
-    for (const key of AUTH_ENV_KEYS) {
-      savedEnv[key] = process.env[key]
-      delete process.env[key]
-    }
+    envGuard.install()
     loadNtnTokenMock.mockReset()
     loadNtnTokenMock.mockResolvedValue(null)
     listNtnWorkspacesMock.mockReset()
@@ -167,14 +153,7 @@ describe("deriveStopAuthSource — success branches return the resolved source",
   })
 
   afterEach(() => {
-    for (const key of AUTH_ENV_KEYS) {
-      const prior = savedEnv[key]
-      if (prior === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = prior
-      }
-    }
+    envGuard.restore()
   })
 
   it("returns 'env-notion-api-token' when NOTION_API_TOKEN is set", async () => {
@@ -197,6 +176,18 @@ describe("deriveStopAuthSource — success branches return the resolved source",
     const source = await deriveStopAuthSource(ctx())
     expect(source).toBe("ntn-auth-json")
     expect(loadNtnTokenMock).toHaveBeenCalledTimes(1)
+    // Pin the quiet propagation contract: `resolveAuth` calls
+    // `loadNtnToken` with `quiet: true` unconditionally so the
+    // ntn-module's stderr ambiguity hints don't fight the
+    // deprecation emitter when an ntn fallback path coexists with
+    // a legacy token. A future refactor that drops the always-quiet
+    // posture (e.g., propagating the new `ResolveAuthOptions.quiet`
+    // through to `loadNtnToken` literally — which would be a
+    // semantics change the synthetic-resolver caller does NOT
+    // intend) would surface here.
+    expect(loadNtnTokenMock).toHaveBeenCalledWith(
+      expect.objectContaining({ quiet: true })
+    )
   })
 
   it("returns 'env-lore-notion-token' for the soft-deprecated env path", async () => {
@@ -229,14 +220,10 @@ describe("deriveStopAuthSource — quiet emission", () => {
   let stderrChunks: string[]
   let stderrSpy: { mockRestore: () => void }
   let realConfigRoot: string
-  let savedEnv: Partial<Record<(typeof AUTH_ENV_KEYS)[number], string | undefined>>
+  const envGuard = withClearedRuntimeEnv(AUTH_ENV_KEYS)
 
   beforeEach(() => {
-    savedEnv = {}
-    for (const key of AUTH_ENV_KEYS) {
-      savedEnv[key] = process.env[key]
-      delete process.env[key]
-    }
+    envGuard.install()
     realConfigRoot = mkdtempSync(join(tmpdir(), "lore-derive-auth-"))
     stderrChunks = []
     stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
@@ -250,14 +237,7 @@ describe("deriveStopAuthSource — quiet emission", () => {
   afterEach(() => {
     stderrSpy.mockRestore()
     rmSync(realConfigRoot, { recursive: true, force: true })
-    for (const key of AUTH_ENV_KEYS) {
-      const prior = savedEnv[key]
-      if (prior === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = prior
-      }
-    }
+    envGuard.restore()
   })
 
   it("does NOT emit a deprecation warning for env-lore-notion-token (quiet: true)", async () => {
