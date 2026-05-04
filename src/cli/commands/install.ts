@@ -1799,37 +1799,159 @@ export function ntnLoginRecovery(
 }
 
 /**
- * Build a human-readable summary of the ntn environment selectors
- * the operator currently has set in their shell. Returns `undefined`
- * when no selectors are set (the implicit prod-default case — no
- * line worth printing).
+ * Build a human-readable summary of the Notion environment the spawned
+ * MCP child will actually resolve to at startup. Driven by the
+ * resolved `ResolvedAuth` because that struct's `baseUrl` IS the
+ * runtime source of truth — it's the value `createClient` consumes —
+ * and `resolveAuth` intentionally branches by auth source so canonical
+ * paths (`env-notion-api-token`, `ntn-auth-json`) ignore `.lore.yaml
+ * auth.baseUrl` for security (a malicious checked-in `.lore.yaml`
+ * could otherwise redirect a bearer token; see
+ * `src/config.ts:340-349`).
  *
- * The line shape is `<env or url> (<source-name>)` so an operator
- * scanning prereqs output sees both the resolved value AND which
- * env var carried it. Helps when an operator forgot they had
- * `NOTION_BASE_URL` set in a stale shell rc.
+ * The annotation names where the resolved value came from so an
+ * operator who forgot they had `LORE_NOTION_BASE_URL` set, or who has
+ * a stale ntn `config.json` env, can see it at install time:
+ *
+ *   - shell env wins for all auth sources (operator-controlled).
+ *   - `ntn-auth-json` otherwise consults ntn's
+ *     `~/.config/notion/config.json` (`undefined` baseUrl == prod,
+ *     the SDK default; see `resolveNtnBaseUrl`).
+ *   - `env-notion-api-token`: shell-only; `undefined` baseUrl == prod.
+ *   - legacy paths (`env-lore-notion-token` / `config-auth-token`)
+ *     honor `.lore.yaml` `auth.baseUrl` directly via
+ *     `legacyBaseUrlOverride`.
+ *
+ * Always returns a line on the auth-resolved branch — operators
+ * benefit from "yes, this is targeting prod" being explicit even on
+ * the silent-default case. The previous shell-env-only display
+ * suppressed the line whenever no shell var was set, which silenced
+ * exactly the `.lore.yaml auth.baseUrl` ↔ ntn-config.json mismatch
+ * footgun this surface exists to prevent.
  */
 function describeNtnEnvSelectors(
+  auth: ResolvedAuth,
+  envSource: NodeJS.ProcessEnv = process.env,
+): string {
+  const baseUrl = auth.baseUrl
+  const env = baseUrl ? ntnEnvFromBaseUrl(baseUrl) : "prod"
+  const annotation = describeBaseUrlSource(auth, envSource, baseUrl)
+  if (env) return `${env} ${annotation}`
+  return `${baseUrl} ${annotation}, non-canonical`
+}
+
+/**
+ * Annotate where `auth.baseUrl` came from for the
+ * `Notion environment:` display. Walks the same priority order as
+ * `resolveOperatorBaseUrl` for shell vars, then falls back to
+ * auth-source-specific knowledge: ntn-auth-json reads ntn's
+ * `config.json`; env tokens consult shell only; legacy paths honor
+ * `.lore.yaml auth.baseUrl`. Pure presentation — no further
+ * resolution work happens here.
+ */
+function describeBaseUrlSource(
+  auth: ResolvedAuth,
+  envSource: NodeJS.ProcessEnv,
+  resolvedBaseUrl: string | undefined,
+): string {
+  for (const key of [
+    "LORE_NOTION_BASE_URL",
+    "NOTION_BASE_URL",
+    "NOTION_API_BASE_URL",
+  ] as const) {
+    if (envSource[key]) return `(from shell ${key})`
+  }
+  // `NOTION_ENV` only feeds `resolveOperatorBaseUrl` when
+  // `ntnEnvBaseUrl` recognizes it (`prod`/`dev`/`stg`). An unrecognized
+  // value (typo, retired env name) returns `undefined` from
+  // `parseNtnEnv` and does NOT drive runtime baseUrl — annotating the
+  // line with it would falsely attribute the resolved value to a
+  // shell var that didn't take effect. Fall through to the
+  // auth-source-specific annotation in that case.
+  const notionEnv = envSource["NOTION_ENV"]
+  if (notionEnv && parseNtnEnv(notionEnv) !== null) {
+    return `(from shell NOTION_ENV=${notionEnv})`
+  }
+
+  switch (auth.source) {
+    case "ntn-auth-json":
+      return resolvedBaseUrl
+        ? "(from ntn config.json)"
+        : "(ntn default; no shell or ntn config.json override)"
+    case "env-notion-api-token":
+      return "(default; no shell base-URL override)"
+    case "env-lore-notion-token":
+    case "config-auth-token":
+      return resolvedBaseUrl
+        ? "(from .lore.yaml auth.baseUrl)"
+        : "(default; no shell or .lore.yaml override)"
+  }
+}
+
+/**
+ * Detect the silent footgun where `.lore.yaml auth.baseUrl` declares a
+ * Notion deployment that the resolved canonical auth source
+ * intentionally ignores, and the declared target disagrees with the
+ * runtime resolution. Returns a multi-line warning the caller surfaces
+ * under the `Notion environment:` line, or `undefined` when no
+ * mismatch.
+ *
+ * Concrete scenario: operator pins `auth.baseUrl: <dev URL>` in
+ * `.lore.yaml`, runs `ntn login` with the prod default (no
+ * `NOTION_ENV=dev`), the canonical security contract drops the repo
+ * config (see `resolveAuth`), and every Notion call goes to prod with
+ * a confusing "vault not accessible" trail. Surfacing the mismatch
+ * names the actionable next step.
+ *
+ * Suppressed when:
+ *   - The auth source is a legacy path — `auth.baseUrl` already wins
+ *     there by construction, no mismatch is possible.
+ *   - The operator's shell has any base-URL or `NOTION_ENV` override
+ *     set — they're explicitly steering the runtime, this is not a
+ *     silent footgun.
+ *   - The declared and resolved baseUrls map to the same canonical
+ *     env (e.g., `https://api.notion.com` alias for prod).
+ */
+function describeAuthBaseUrlConfigMismatch(
+  auth: ResolvedAuth,
+  config: LoreConfig | undefined,
   envSource: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  const env = envSource["NOTION_ENV"]
-  const baseUrl =
+  if (auth.source !== "ntn-auth-json" && auth.source !== "env-notion-api-token") {
+    return undefined
+  }
+  const configBaseUrl = config?.auth?.baseUrl
+  if (!configBaseUrl) return undefined
+  if (
     envSource["LORE_NOTION_BASE_URL"] ||
     envSource["NOTION_BASE_URL"] ||
     envSource["NOTION_API_BASE_URL"]
-  if (!env && !baseUrl) return undefined
-
-  const parts: string[] = []
-  if (env) parts.push(`NOTION_ENV=${env}`)
-  if (baseUrl) {
-    const sourceName = envSource["LORE_NOTION_BASE_URL"]
-      ? "LORE_NOTION_BASE_URL"
-      : envSource["NOTION_BASE_URL"]
-        ? "NOTION_BASE_URL"
-        : "NOTION_API_BASE_URL"
-    parts.push(`${sourceName}=${baseUrl}`)
+  ) {
+    return undefined
   }
-  return parts.join(", ")
+  // `NOTION_ENV` suppresses the warning only when it parses to a
+  // recognized env. An unparseable value (e.g., a typo like
+  // `NOTION_ENV=devv`) does NOT drive `resolveOperatorBaseUrl`, so
+  // the silent-footgun configuration this warning exists to surface
+  // is still in play — keep it eligible.
+  const notionEnv = envSource["NOTION_ENV"]
+  if (notionEnv && parseNtnEnv(notionEnv) !== null) return undefined
+  const resolvedEnv = auth.baseUrl ? ntnEnvFromBaseUrl(auth.baseUrl) : "prod"
+  const configEnv = ntnEnvFromBaseUrl(configBaseUrl)
+  if (resolvedEnv && configEnv && resolvedEnv === configEnv) return undefined
+
+  const declared = configEnv ?? configBaseUrl
+  const resolved = resolvedEnv ?? auth.baseUrl ?? "prod"
+  const sourceHint =
+    auth.source === "ntn-auth-json"
+      ? "ntn's config.json"
+      : "the NOTION_API_TOKEN environment"
+  return [
+    `.lore.yaml declares auth.baseUrl=${declared} but resolved auth targets ${resolved}.`,
+    `Repo-controlled auth.baseUrl is ignored on canonical sources for security; runtime`,
+    `consults ${sourceHint}. To target ${declared}, set NOTION_ENV in your shell or run`,
+    `\`ntn login\` against the right env.`,
+  ].join(" ")
 }
 
 /**
@@ -1919,17 +2041,6 @@ export async function ensurePrerequisites(
     console.log(`  ntn version:          ✓ ${installedVersion ?? "unknown"}`)
   }
 
-  // Surface ntn environment selectors so dev / staging operators see
-  // which env their install will resolve against. The MCP entry
-  // forwards these names (`RUNTIME_FORWARDED_KEYS`), and ntn's own
-  // `runNtnLogin` spawn inherits them via `process.env` spread —
-  // showing the resolved values up front prevents the "I thought I
-  // was logging into dev but the install captured prod" footgun.
-  const envSelectors = describeNtnEnvSelectors()
-  if (envSelectors) {
-    console.log(`  Notion environment:   ${envSelectors}`)
-  }
-
   // 3. Auth resolution. Offer ntn login on no-source-resolved.
   //
   // The catch around `resolveAuth` is narrow on purpose: a malformed
@@ -1944,6 +2055,7 @@ export async function ensurePrerequisites(
   if (found) {
     config = await loadConfig(found.path)
   }
+
   let auth: ResolvedAuth | undefined
   try {
     auth = await resolveAuth(config, found?.root ?? context.configRoot)
@@ -1952,6 +2064,20 @@ export async function ensurePrerequisites(
   }
 
   if (auth) {
+    // Surface the runtime Notion environment so dev / staging operators
+    // see which deployment their install will land on. Driven by
+    // `auth.baseUrl` because that's what the spawned MCP child will
+    // actually use; canonical auth sources intentionally ignore
+    // `.lore.yaml auth.baseUrl` for security so deriving from config
+    // would lie on exactly the configurations this surface most needs
+    // to be honest about. The mismatch warning catches the silent
+    // footgun where a project pins `auth.baseUrl: <dev URL>` but
+    // canonical auth resolved against prod.
+    console.log(`  Notion environment:   ${describeNtnEnvSelectors(auth)}`)
+    const mismatch = describeAuthBaseUrlConfigMismatch(auth, config)
+    if (mismatch) {
+      console.log(`                        ! ${mismatch}`)
+    }
     console.log(`  Auth source:          ✓ ${describeAuthSource(auth.source)}`)
     if (
       auth.source === "env-lore-notion-token" ||
