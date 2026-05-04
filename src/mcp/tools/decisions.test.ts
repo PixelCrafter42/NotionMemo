@@ -2362,3 +2362,86 @@ describe("lore-decision action='create' — nonblank decision/rationale (issue #
     )
   })
 })
+
+// ===========================================================================
+// Issue #283 round-4 — Test C: scoped decision → decided_by facts inherit scope.
+// Pins the call-site contract at `lore-decision action='create'`'s
+// `services.facts.create` invocation. Without this test, a future
+// contributor refactoring the decided_by emission path could silently
+// drop the `scope` argument and the leak vector would re-open.
+// ===========================================================================
+
+describe("lore-decision decided_by scope inheritance (issue #283 round-4 Test C)", () => {
+  it("scoped decision emits decided_by facts under the same scope", async () => {
+    const { registerDecisionTools: register } = await import("./decisions.js")
+    // Local mock-server harness (mirrors the one earlier in this
+    // file) — the closure pattern keeps Test C self-contained.
+    const handlers = new Map<string, (args: never) => unknown>()
+    const mockServer = {
+      server: {
+        registerTool: (name: string, _config: unknown, handler: (args: never) => unknown) => {
+          handlers.set(name, handler)
+        },
+      },
+      getActionHandler(toolName: string, action: string) {
+        const handler = handlers.get(toolName)
+        if (!handler) throw new Error(`missing handler ${toolName}`)
+        return (args: Record<string, unknown>) => handler({ ...args, action } as never)
+      },
+    }
+    const created = makeDecision("dec-scoped", {
+      title: "Adopt session-only auth",
+      projectIds: ["proj-a"],
+      scope: {
+        kind: "session",
+        key: "sess-A",
+        audience: "",
+        lifetime: null,
+        expiresAt: null,
+      },
+    })
+    const factCreate = vi.fn().mockResolvedValue({ id: "fact-1" })
+    const services = {
+      decisions: {
+        create: vi.fn().mockResolvedValue(created),
+        getById: vi.fn(),
+        supersede: vi.fn(),
+      },
+      facts: {
+        create: factCreate,
+        queryBySourceMemory: vi.fn().mockResolvedValue([]),
+      },
+      memories: { decrementConfidence: vi.fn() },
+      topics: { getOrCreate: vi.fn() },
+      projects: { findByName: vi.fn() },
+      entities: {
+        resolveOrCreateEntity: vi
+          .fn()
+          .mockResolvedValue({ entity: null, ambiguous: false, candidates: [], created: false }),
+      },
+      context: { project: { id: "proj-a", name: "a" }, isCatchAllFallback: false },
+      sessionMemories: { record: vi.fn(), get: vi.fn() },
+      identity: { resolveAuthor: vi.fn(async () => null), clearCache: vi.fn() },
+    }
+
+    register(mockServer.server as never, services as never)
+    const create = mockServer.getActionHandler("lore-decision", "create")
+
+    await create({
+      decision: "Adopt session-only auth",
+      rationale: "Body",
+      affects: ["AuthService"],
+      scope: { kind: "session", key: "sess-A" },
+    } as never)
+
+    // The decided_by fact emission carries the decision's session scope.
+    expect(factCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        predicate: "decided_by",
+        subject: "AuthService",
+        sourceMemoryId: "dec-scoped",
+        scope: { kind: "session", key: "sess-A" },
+      })
+    )
+  })
+})

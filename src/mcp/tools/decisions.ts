@@ -15,9 +15,14 @@ import {
   syncDecisionReachability,
 } from "../decision-graph.js"
 import { displayId, renderTrustLine, resolveTitles, truncateSynopsis } from "../render.js"
-import { ACTIVE_DECISION_STATUSES, SYNOPSIS_MAX } from "../../types.js"
+import {
+  ACTIVE_DECISION_STATUSES,
+  SYNOPSIS_MAX,
+  memoryScopeToInput,
+} from "../../types.js"
 import type { Decision, DecisionSummary, DecisionStatus } from "../../types.js"
 import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { scopeInputSchema } from "./scope-schema.js"
 import { clearableYmdDateSchema, ymdDateSchema } from "./date-schema.js"
 import { nonBlankBody, nonBlankString } from "./text-schema.js"
 import {
@@ -279,6 +284,7 @@ interface CreateArgs {
   author?: string
   agent?: string
   session?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 async function handleCreate(
@@ -349,6 +355,8 @@ async function handleCreate(
         author: resolvedAuthor,
         agent: args.agent,
         session: args.session,
+        // Scope / lifetime (issue #283).
+        scope: args.scope,
       }),
       probePromise,
     ])
@@ -408,6 +416,16 @@ async function handleCreate(
           sourceMemoryId: created.id,
           confidence: created.confidence,
           subjectEntityId,
+          // Issue #283 review — system-managed `decided_by` facts
+          // must inherit the decision's scope so a session-scoped
+          // decision does not leak the affected entity through
+          // `lore-decision action='context'` or `lore-query
+          // action='ask'` for readers outside that session. The
+          // converted scope passes through `createWithDedup`'s
+          // scope-aware merge contract, so a same-(entity, decision)
+          // fact under a different scope produces a separate row
+          // rather than absorbing.
+          scope: memoryScopeToInput(created.scope),
         })
       } catch (factWriteError) {
         throw new DecisionCreateFactPartialFailureError({
@@ -475,6 +493,11 @@ async function handleCreate(
           projectIds: created.projectIds.length > 0 ? created.projectIds : undefined,
           sourceMemoryId: created.id,
           confidence: created.confidence,
+          // Issue #283 review — supersedes_decision facts inherit
+          // the new decision's scope; the new decision is the
+          // governing identity slot, so its scope determines who
+          // can see the supersession edge.
+          scope: memoryScopeToInput(created.scope),
         })
       } catch (supersedeError) {
         throw new DecisionCreateSupersedePartialFailureError({
@@ -878,6 +901,10 @@ async function handleSupersede(
       projectIds: newDecision.projectIds.length > 0 ? newDecision.projectIds : undefined,
       sourceMemoryId: newDecision.id,
       confidence: newDecision.confidence,
+      // Issue #283 review — same posture as the create-time
+      // supersedes_decision write: the new decision's scope
+      // determines visibility of the supersession edge.
+      scope: memoryScopeToInput(newDecision.scope),
     })
     // Contradiction decrement is advisory: a transient 429 / archived
     // target on the old decision's `Confidence Score` write must not
@@ -966,6 +993,7 @@ const decisionDispatchSchema = z.discriminatedUnion("action", [
     author: z.string().optional(),
     agent: z.string().optional(),
     session: z.string().optional(),
+    scope: scopeInputSchema,
   }),
   z.object({
     action: z.literal("list"),
@@ -1193,6 +1221,7 @@ export function registerDecisionTools(server: McpServer, services: LoreServices)
           .string()
           .optional()
           .describe("(action='supersede') Required. ID of the decision being replaced."),
+        scope: scopeInputSchema,
       },
     },
     async (args) => {

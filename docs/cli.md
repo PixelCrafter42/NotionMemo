@@ -13,7 +13,7 @@ registered flags for a command.
 | `lore auth --migrate`                                      | Walk legacy token users through migration to ntn-first auth, including legacy-token and ntn-token vault preflights                                                                                                                                                                                                                                                                                                                                                                                   |
 | `lore search <query>`                                      | Semantic search across memories (`-p`, `-t`, `-n` flags)                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `lore mine [path]`                                         | Index project files as source=`file` memories, updating prior mined rows for the same `(title, source, projectIds)` instead of creating duplicates (`--dry-run`, `--pattern`, `-n`)                                                                                                                                                                                                                                                                                                                  |
-| `lore status`                                              | Show vault status, [topology health](topology.md) when `upstreamVaults` or `promotionTargets` are configured, database counts, task/confidence summaries, proposed-memory inbox count, wake-up coverage counters, active projects, digest/drift watermarks, and recent background autosave/digest failures (`--project <name>` scopes project-dependent sections)                                                                                                                                                |
+| `lore status`                                              | Show vault status, [topology health](topology.md) when `upstreamVaults` or `promotionTargets` are configured, database counts, task/confidence summaries, proposed-memory inbox count, expired/expiring/out-of-context scoped row counters (issue #283), wake-up coverage counters, active projects, digest/drift watermarks, and recent background autosave/digest failures (`--project <name>` scopes project-dependent sections)                                                                                                                                                |
 | `lore inbox list`                                          | List memories awaiting review (`Status = proposed`). Optional `--project <name>`, `-n <limit>` (default 50, max 100). Empty inbox prints a single line and exits 0.                                                                                                                                                                                                                                                                                                                              |
 | `lore inbox approve <memoryId>`                            | Promote a `Status: proposed` memory to `accepted` and append a Reviewed audit block. Optional `--reason <text>` and `--reviewer <name>`. Reviewer defaults to the engineer-identity chain (`LORE_USER_NAME` → `users.me`).                                                                                                                                                                                                                                                                       |
 | `lore inbox reject <memoryId>`                             | Flip a `Status: proposed` memory to `rejected` and append a Reviewed audit block. Same `--reason` / `--reviewer` flags as `approve`.                                                                                                                                                                                                                                                                                                                                                              |
@@ -40,3 +40,28 @@ registered flags for a command.
 See [`conflict-detection.md`](conflict-detection.md) for the full conflict scan
 workflow.
 See [`evals.md`](evals.md) for eval suite format, metrics, and artifact details.
+
+## Scope and lifetime in `lore status` (issue #283)
+
+`lore status` (and the MCP parallel `lore-context action='status'`)
+surfaces three additional triage lines when scope-aware retrieval has
+something to clean up. Each line renders only when its memory + fact
+counts sum to a non-zero value:
+
+```
+Expired scoped rows: 12 (memories: 8, facts: 4) — consider archiving via `lore-memory action='archive'` or `lore-fact action='invalidate'`
+Expiring soon (≤7d): 3 (memories: 2, facts: 1)
+Narrow-scope rows outside this context: 1 (memories: 1, facts: 0) — rows whose Scope Kind is user/agent/role/session/run/environment and whose Scope Key does not match the resolved scope context
+```
+
+The "narrow-scope outside this context" line is the load-bearing
+operator signal: it counts rows that *would* surface for a different
+reader (different `LORE_SESSION_ID`, `LORE_AGENT_NAME`, etc.) but
+not for the current process. A non-zero value is normal in a
+multi-engineer / multi-agent vault — it does not indicate a bug.
+
+A vault that hasn't yet run `lore migrate` to add the issue #283
+schema columns prints a single one-line warning at startup
+(`[lore] scope/lifetime columns missing on this vault — recall is
+using pre-#283 retrieval shape`) and these triage lines render zeros
+across the board until the migration lands.

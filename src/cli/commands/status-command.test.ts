@@ -151,7 +151,14 @@ describe("statusCommand", () => {
             facts: 0,
           })),
         },
-        facts: { countByPredicateRaw: vi.fn(async () => 0) },
+        facts: {
+          countByPredicateRaw: vi.fn(async () => 0),
+          expiringScopedStats: vi.fn(async () => ({
+            expired: 0,
+            expiringSoon: 0,
+            narrowScopeOutOfContext: 0,
+          })),
+        },
         memories: {
           confidenceStats: vi.fn(async () => ({
             totalMemories: 0,
@@ -163,6 +170,11 @@ describe("statusCommand", () => {
             total: 0,
             bySource: {},
             byAgent: {},
+          })),
+          expiringScopedStats: vi.fn(async () => ({
+            expired: 0,
+            expiringSoon: 0,
+            narrowScopeOutOfContext: 0,
           })),
         },
         projects: { list: vi.fn(async () => []) },

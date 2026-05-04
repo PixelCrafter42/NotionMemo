@@ -16,6 +16,10 @@ import {
   loadWakeUpData,
 } from "../../core/wakeup.js"
 import type { Memory } from "../../types.js"
+import {
+  formatExpiringScopedSummary,
+  loadExpiringScopedStatus,
+} from "../../core/expiring-scoped.js"
 import { subProjectNames } from "../../core/context.js"
 import { DIGEST_STALE_DAYS } from "../../core/digest.js"
 import {
@@ -163,13 +167,17 @@ export const statusCommand = new Command("status")
       // parallel dispatch of the top-level probes; it does not
       // parallelize the iterator inside `confidenceStats`. The
       // method's docstring documents the cost gap.
-      const [tasks, confidence, proposedInbox, wakeUp] = await Promise.all([
+      const [tasks, confidence, proposedInbox, expiringScoped, wakeUp] = await Promise.all([
         taskStats(services.tasks, {
           projectId: project?.id,
           today: todayUtc(),
         }),
         services.memories.confidenceStats({ projectId: project?.id }),
         loadProposedInboxStatus(services, { projectId: project?.id }),
+        // Issue #283 — surfaces expired/expiring/out-of-context rows
+        // for cleanup. Same fan-out posture as the other probes;
+        // wall-clock at the orchestration level stays `max(...)`.
+        loadExpiringScopedStatus(services, { projectId: project?.id }),
         loadWakeUpData(services, {
           projectId: project?.id,
           includeMemoryContent: false,
@@ -179,6 +187,7 @@ export const statusCommand = new Command("status")
       for (const line of formatTaskSummary(tasks)) console.log(line)
       for (const line of formatConfidenceSummary(confidence)) console.log(line)
       for (const line of formatProposedInboxStatus(proposedInbox)) console.log(line)
+      for (const line of formatExpiringScopedSummary(expiringScoped)) console.log(line)
       if (wakeUp.coverage) {
         for (const line of formatWakeUpCoverageReport(wakeUp.coverage)) {
           console.log(line)
@@ -831,3 +840,7 @@ export function formatConfidenceSummary(report: ConfidenceStatsReport): string[]
 // the CLI and MCP `lore-context action='status'` surfaces emit the same
 // line for the same vault state. Same parity contract as `taskStats` /
 // `formatTaskSummary` in `src/core/task.ts`.
+//
+// Expiring scoped rows (issue #283) — `loadExpiringScopedStatus` +
+// `formatExpiringScopedSummary` live in `src/core/expiring-scoped.ts`
+// for the same parity reason.

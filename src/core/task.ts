@@ -39,9 +39,11 @@ import type {
   DatabaseRef,
 } from "../types.js"
 import { ACTIVE_TASK_STATES, STALE_TASK_DAYS } from "../types.js"
+import type { MemoryScopeContext } from "../types.js"
 import { buildMemoryProps, MEMORY_PROPS } from "../notion/schema.js"
 import { isMissingPropertyError } from "../notion/errors.js"
-import { projectOrUnscopedFilter } from "../notion/filters.js"
+import { projectOrUnscopedFilter, withDefaultScopeFilter } from "../notion/filters.js"
+import { matchesDefaultScope } from "./memory.js"
 import { decodeTextEntities } from "../notion/html-entities.js"
 import { isLiveFullPage } from "../notion/extractors.js"
 import {
@@ -155,10 +157,40 @@ export interface OverdueTaskWindow {
 }
 
 export class TaskService {
+  /**
+   * Resolved scope context (issue #283) — same posture as
+   * `MemoryService.scopeCtx`. The default-retrieval filter narrows
+   * `list()` to broadcast scopes plus narrow scopes whose `Scope
+   * Key` matches the reader's identity slot. Tests construct
+   * `TaskService` without scope context and stay on the pre-#283
+   * filter shape; production `initServicesFromConfig` always passes
+   * a context, turning the filter on.
+   */
+  private scopeCtx: MemoryScopeContext = {}
+  private scopeFilterEnabled = false
+
   constructor(
     private client: Client,
-    private db: DatabaseRef
-  ) {}
+    private db: DatabaseRef,
+    scopeCtx?: MemoryScopeContext
+  ) {
+    if (scopeCtx) {
+      this.scopeCtx = scopeCtx
+      this.scopeFilterEnabled = true
+    }
+  }
+
+  /** Replace the scope context after construction. Same posture as
+   *  `MemoryService.setScopeContext`. */
+  setScopeContext(ctx: MemoryScopeContext): void {
+    this.scopeCtx = ctx
+    this.scopeFilterEnabled = true
+  }
+
+  /** Snapshot of the active scope context (read-only). */
+  getScopeContext(): Readonly<MemoryScopeContext> {
+    return this.scopeCtx
+  }
 
   /**
    * Create a `Kind = task` memory. `subject` becomes the page title,
@@ -216,6 +248,18 @@ export class TaskService {
         taskState: state,
         blockedBy,
         entity,
+        // Scope / lifetime (issue #283). Tasks default to whatever
+        // scope the caller passes; the conventional pairing is
+        // `kind: "session"` + `lifetime: "until-task-closed"` for
+        // per-session tracked work. The translation from
+        // `MemoryScopeInput` to builder primitives mirrors
+        // `MemoryService.create`'s helper so the column writes are
+        // consistent across both surfaces.
+        scopeKind: input.scope?.kind,
+        scopeKey: input.scope?.key,
+        audience: input.scope?.audience,
+        lifetime: input.scope?.lifetime,
+        expiresAt: input.scope?.expiresAt,
       }),
     })
 
@@ -365,7 +409,30 @@ export class TaskService {
       })
     }
 
-    const filter = filters.length > 1 ? { and: filters } : filters[0]
+    const baseFilter = filters.length > 1 ? { and: filters } : filters[0]
+    // Default scope filter (issue #283). A session-scoped task created
+    // by another reader's session must not surface in this reader's
+    // `lore-task action='list'`; the filter applies the same scope-
+    // inclusion rule as `MemoryService.list`. `includeOutOfScope: true`
+    // opts out for audit/operator paths; the filter no-ops when no
+    // scope context was injected (tests on the pre-#283 filter shape).
+    //
+    // The server-side filter is 2-deep (Notion's compound-filter
+    // limit); the kind+key binding runs client-side via
+    // `matchesDefaultScope` threaded into `collectLivePages` as an
+    // `extraFilter`. The walker backfills past dropped rows so the
+    // result still hits `limit` when the vault has enough scope-
+    // matching tasks.
+    const today = todayUtc()
+    const filter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, today)
+    const applyExtraFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, today)
     const sorts: QueryDataSourceParameters["sorts"] =
       opts?.sortBy === "updatedAtAsc"
         ? [
@@ -406,6 +473,7 @@ export class TaskService {
           page_size,
           start_cursor,
         }),
+      extraFilter: applyExtraFilter,
     })
 
     return {
@@ -497,6 +565,39 @@ export class TaskService {
       props[MEMORY_PROPS.REVIEW_BY] = isCleared(input.dueDate)
         ? { date: null }
         : { date: { start: input.dueDate as string } }
+    }
+    // Scope / lifetime (issue #283). Inlined-update path mirrors
+    // `MemoryService.update`'s shape one-for-one — same tristate
+    // semantics on each column. Tasks are Memories so the columns
+    // are the same.
+    if (input.scope !== undefined) {
+      const scope = input.scope
+      if (scope.kind !== undefined) {
+        props[MEMORY_PROPS.SCOPE_KIND] =
+          scope.kind === null ? { select: null } : { select: { name: scope.kind } }
+      }
+      if (scope.key !== undefined) {
+        props[MEMORY_PROPS.SCOPE_KEY] = {
+          rich_text: [{ text: { content: scope.key } }],
+        }
+      }
+      if (scope.audience !== undefined) {
+        props[MEMORY_PROPS.AUDIENCE] = {
+          rich_text: [{ text: { content: scope.audience } }],
+        }
+      }
+      if (scope.lifetime !== undefined) {
+        props[MEMORY_PROPS.LIFETIME] =
+          scope.lifetime === null
+            ? { select: null }
+            : { select: { name: scope.lifetime } }
+      }
+      if (scope.expiresAt !== undefined) {
+        props[MEMORY_PROPS.EXPIRES_AT] =
+          scope.expiresAt === null
+            ? { date: null }
+            : { date: { start: scope.expiresAt } }
+      }
     }
 
     let propertiesApplied = false
@@ -700,6 +801,7 @@ export class TaskService {
   async queryOverdue(opts?: {
     projectId?: string
     limit?: number
+    includeOutOfScope?: boolean
   }): Promise<TaskSummary[]> {
     const { items } = await this.queryOverdueWindow(opts)
     return items
@@ -708,6 +810,15 @@ export class TaskService {
   async queryOverdueWindow(opts?: {
     projectId?: string
     limit?: number
+    /**
+     * Issue #283 — opt out of the default-scope filter so audit /
+     * migration callers can see narrow-scope and expired rows. The
+     * MCP `lore-query action='audit'` surface consumes this method,
+     * so the gate keeps the default `false`: a session-scoped
+     * overdue task must not leak to a different reader through
+     * audit any more than it does through `list()`.
+     */
+    includeOutOfScope?: boolean
   }): Promise<OverdueTaskWindow> {
     const today = new Date().toISOString().split("T")[0]
     const filters: Array<Record<string, unknown>> = [
@@ -724,6 +835,24 @@ export class TaskService {
       filters.push(projectOrUnscopedFilter(opts.projectId))
     }
 
+    const baseFilter = { and: filters }
+    // Default scope filter (issue #283). Same posture as `list()`
+    // above: server-side narrows to broadcast + reader's narrow kinds
+    // (Notion's 2-deep cap), client-side `matchesDefaultScope`
+    // threaded as `collectLivePages.extraFilter` enforces the
+    // kind+key binding so a session-scoped overdue task drops out
+    // of `lore-query action='audit'` for readers whose session id
+    // differs.
+    const filter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, today)
+    const applyExtraFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, today)
+
     const limit = opts?.limit ?? LIVE_PAGE_REFILL_MAX_ROWS
     if (limit <= 0) return { items: [], capped: false }
     const result = await collectLivePages({
@@ -732,11 +861,12 @@ export class TaskService {
       query: ({ page_size, start_cursor }) =>
         this.client.dataSources.query({
           data_source_id: this.db.dataSourceId,
-          filter: { and: filters } as QueryDataSourceParameters["filter"],
+          filter: filter as QueryDataSourceParameters["filter"],
           sorts: [{ property: MEMORY_PROPS.REVIEW_BY, direction: "ascending" }],
           page_size,
           start_cursor,
         }),
+      extraFilter: applyExtraFilter,
     })
     if (result.capped) {
       warnLivePageCapFired({

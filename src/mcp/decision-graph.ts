@@ -1,6 +1,6 @@
 import { settleAll } from "../core/settle.js"
 import { computeSubjectKey } from "../notion/normalize.js"
-import { ACTIVE_DECISION_STATUSES } from "../types.js"
+import { ACTIVE_DECISION_STATUSES, memoryScopeToInput } from "../types.js"
 import type {
   CreateFactInput,
   Decision,
@@ -41,6 +41,9 @@ type QueryFactsOpts = {
   includeInvalidated?: boolean
   predicates?: FactPredicate[]
   limit?: number
+  /** Issue #283 — opt out of the default scope filter for internal
+   *  reconciliation paths. */
+  includeOutOfScope?: boolean
 }
 
 export interface DecisionGraphServices {
@@ -376,9 +379,16 @@ export async function syncDecisionReachability(
   const [oldFacts, existingNewFacts] = await Promise.all([
     services.facts.queryBySourceMemory(oldDecisionId, {
       predicates: ["decided_by"],
+      // Decision-graph reachability sync must see every decided_by
+      // fact regardless of scope context — this is internal
+      // reconciliation that re-points the graph from the old to the
+      // new decision and would lose decided_by edges on out-of-scope
+      // sourced facts otherwise.
+      includeOutOfScope: true,
     }),
     services.facts.queryBySourceMemory(newDecision.id, {
       predicates: ["decided_by"],
+      includeOutOfScope: true,
     }),
   ])
 
@@ -417,6 +427,11 @@ export async function syncDecisionReachability(
       // fact lands as a text-only row that the next `--build-entities`
       // pass can re-point.
       subjectEntityId: fact.subjectEntityId ?? undefined,
+      // Issue #283 review — retargeted decided_by facts inherit the
+      // new decision's scope. The previous fact (now invalidated)
+      // carried the OLD decision's scope; the retarget rebuilds the
+      // edge under the governing decision's identity slot.
+      scope: memoryScopeToInput(newDecision.scope),
     })
 
     existingKeys.add(factKey)

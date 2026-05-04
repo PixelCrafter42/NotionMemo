@@ -44,7 +44,109 @@ import {
   touchDriftMarker,
 } from "./hooks/drift-marker.js"
 import { SessionMemoryTracker } from "./session-memory-tracker.js"
-import type { LoreConfig, ResolvedContext } from "./types.js"
+import type {
+  LoreConfig,
+  MemoryScopeContext,
+  ResolvedContext,
+  VaultDatabases,
+} from "./types.js"
+import { FACT_PROPS, MEMORY_PROPS } from "./notion/schema.js"
+
+/**
+ * Build the per-process `MemoryScopeContext` that `MemoryService` and
+ * `FactService` use to filter narrow-scope rows out of default reads
+ * (issue #283).
+ *
+ * Slots are populated from environment variables exported by the
+ * caller — the same env-driven posture as the existing
+ * `LORE_AGENT_NAME` / `LORE_USER_NAME` resolution. Slots not exported
+ * remain undefined, which means "no narrow-scope row of that kind
+ * surfaces in default retrieval" — consistent with the no-identity
+ * branch of the scope filter.
+ *
+ * | Env var               | Slot          |
+ * | --------------------- | ------------- |
+ * | `LORE_USER_NAME`      | `userId`      |
+ * | `LORE_AGENT_NAME`     | `agent`       |
+ * | `LORE_ROLE`           | `role`        |
+ * | `LORE_SESSION_ID`     | `session`     |
+ * | `LORE_RUN_ID`         | `run`         |
+ * | `LORE_ENVIRONMENT`    | `environment` |
+ *
+ * Empty / whitespace-only env values normalize to undefined so a
+ * caller that exports `LORE_SESSION_ID=""` doesn't accidentally
+ * surface every session-scoped row whose `Scope Key` is also empty.
+ *
+ * Pure function over `process.env` — no Notion calls, no async work.
+ * Tests can override by passing a populated context to the
+ * `MemoryService` / `FactService` constructors directly or via
+ * `setScopeContext`.
+ */
+/**
+ * Probe the live Memories and Facts data sources for the issue #283
+ * scope columns. Returns `true` when both DBs declare `Scope Kind` and
+ * `Expires At`; returns `false` when either column is missing on
+ * either DB.
+ *
+ * Used at services init to decide whether the default scope filter
+ * is safe to enable. A vault that hasn't yet run `lore migrate` has
+ * no scope columns, so threading the filter through every read would
+ * fail with `validation_error` on the first call; the probe lets us
+ * gracefully degrade to pre-#283 retrieval shape until migration
+ * runs.
+ *
+ * The probe is one fan-out of `dataSources.retrieve` calls (already
+ * gated by the rate-limit middleware) — single round-trip cost paid
+ * once per process. Failure (transient 5xx, rate-limit blip) is
+ * caught at the call site; on probe failure the caller falls back to
+ * the optimistic "columns exist" branch so a transient blip at
+ * startup doesn't disable scope filtering for the entire process.
+ */
+export async function probeScopeColumnsPresent(
+  client: Client,
+  db: VaultDatabases
+): Promise<boolean> {
+  const [memoriesDs, factsDs] = await Promise.all([
+    client.dataSources.retrieve({ data_source_id: db.memories.dataSourceId }),
+    client.dataSources.retrieve({ data_source_id: db.facts.dataSourceId }),
+  ])
+  const memProps = (memoriesDs as { properties: Record<string, unknown> }).properties
+  const factProps = (factsDs as { properties: Record<string, unknown> }).properties
+  // Check the two load-bearing columns on each DB. The other three
+  // (`Scope Key`, `Audience`, `Lifetime`) ride along — Notion's
+  // schema migration is per-DB additive, so the migration adds all
+  // five columns in lockstep on each DB. Checking two per DB is
+  // enough to detect "migration has not run on this DB."
+  return (
+    MEMORY_PROPS.SCOPE_KIND in memProps &&
+    MEMORY_PROPS.EXPIRES_AT in memProps &&
+    FACT_PROPS.SCOPE_KIND in factProps &&
+    FACT_PROPS.EXPIRES_AT in factProps
+  )
+}
+
+export function resolveMemoryScopeContext(): MemoryScopeContext {
+  const ctx: MemoryScopeContext = {}
+  const slot = (env: string): string | undefined => {
+    const raw = process.env[env]
+    if (raw === undefined) return undefined
+    const trimmed = raw.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  }
+  const userId = slot("LORE_USER_NAME")
+  if (userId !== undefined) ctx.userId = userId
+  const agent = slot("LORE_AGENT_NAME")
+  if (agent !== undefined) ctx.agent = agent
+  const role = slot("LORE_ROLE")
+  if (role !== undefined) ctx.role = role
+  const session = slot("LORE_SESSION_ID")
+  if (session !== undefined) ctx.session = session
+  const run = slot("LORE_RUN_ID")
+  if (run !== undefined) ctx.run = run
+  const environment = slot("LORE_ENVIRONMENT")
+  if (environment !== undefined) ctx.environment = environment
+  return ctx
+}
 
 /**
  * Drift-check policy for `initServices` / `initServicesFromConfig`.
@@ -151,6 +253,16 @@ export interface LoreServices {
    * silently degrading caching to per-call fan-out.
    */
   wakeupCache: WakeUpCache
+  /**
+   * Resolved scope context for the current process (issue #283).
+   * `MemoryService` and `FactService` already hold their own copies
+   * via `setScopeContext`; this snapshot is exposed on the services
+   * bundle so MCP audit responses, the `lore status` rendering, and
+   * a future operator-facing CLI can surface "which identity slots
+   * are populated for this session." Empty when no `LORE_*` env vars
+   * are set.
+   */
+  scopeContext: MemoryScopeContext
 }
 
 export const AUTH_REFRESH_UNAVAILABLE_CACHE_MS = 1_000
@@ -193,15 +305,57 @@ export async function initServicesFromConfig(
   const db = vault.databases
   const projects = new ProjectService(client, db.projects)
   const topics = new TopicService(client, db.topics)
-  const memories = new MemoryService(client, db.memories)
-  const facts = new FactService(client, db.facts)
+  // Resolve the per-process scope context (issue #283). Populated
+  // from environment variables that callers (CLI commands, MCP host
+  // wrappers, hooks) export deliberately. Empty defaults are safe —
+  // the default scope filter falls back to "broadcast-only" when an
+  // identity slot is missing, so retrieval is consistent with
+  // pre-#283 behavior on a vault that never declares scope.
+  //
+  // Migration safety: the scope filter references `Scope Kind` and
+  // `Expires At` columns. If those columns are missing on a legacy
+  // vault that hasn't yet run `lore migrate`, every default read
+  // would fail with a `validation_error`. We probe the live
+  // schema once at startup and disable the filter when the columns
+  // are absent — recall on legacy vaults stays byte-identical to
+  // pre-#283 until the operator runs migration. A one-line stderr
+  // notice surfaces the gap so the operator knows to run
+  // `lore migrate`.
+  const scopeCtx = resolveMemoryScopeContext()
+  const scopeColumnsReady = await probeScopeColumnsPresent(client, db).catch(
+    () => {
+      // Probe failure (transient 5xx, rate-limit blip) is the
+      // conservative branch: assume the columns exist and let any
+      // genuine missing-property error surface from the first read.
+      // The alternative (assume missing, disable scope) would silently
+      // turn off the filter on a working vault for the entire process
+      // lifetime when one transient retrieve blip happens at startup.
+      return true
+    }
+  )
+  if (!scopeColumnsReady) {
+    process.stderr.write(
+      "[lore] scope/lifetime columns missing on this vault — recall " +
+        "is using pre-#283 retrieval shape. Run `lore migrate` to add " +
+        "Scope Kind / Scope Key / Audience / Lifetime / Expires At and " +
+        "enable scope-aware retrieval.\n"
+    )
+  }
+  const effectiveScopeCtx = scopeColumnsReady ? scopeCtx : undefined
+  const memories = new MemoryService(client, db.memories, effectiveScopeCtx)
+  const facts = new FactService(client, db.facts, effectiveScopeCtx)
   // Decisions are backed by the Memories DB — same DatabaseRef, different
   // business logic (Kind = decision discriminator, supersession chains,
-  // index-tier listings without body fetch).
-  const decisions = new DecisionService(client, db.memories)
+  // index-tier listings without body fetch). Scope context threads
+  // through so `lore-decision action='list'` and the wake-up
+  // Decisions Requiring Attention section apply the same default
+  // scope filter as `lore-memory` reads.
+  const decisions = new DecisionService(client, db.memories, effectiveScopeCtx)
   // Tasks (P3-02) are likewise Memories-DB backed via the `Kind = task`
   // discriminator. Tasks are the canonical surface for tracked work.
-  const tasks = new TaskService(client, db.memories)
+  // Scope context threads through so `lore-task action='list'`
+  // applies the same default scope filter.
+  const tasks = new TaskService(client, db.memories, effectiveScopeCtx)
   const entities = new EntityService(client, db.entities)
 
   const resolution = await resolveProject(cwd, configRoot, config, projects)
@@ -235,6 +389,7 @@ export async function initServicesFromConfig(
     identity,
     authSource: auth.source,
     wakeupCache: new WakeUpCache(),
+    scopeContext: scopeCtx,
   }
 }
 

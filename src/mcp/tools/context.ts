@@ -40,6 +40,10 @@ import {
   loadProposedInboxStatus,
 } from "../../core/proposed-inbox.js"
 import {
+  formatExpiringScopedSummary,
+  loadExpiringScopedStatus,
+} from "../../core/expiring-scoped.js"
+import {
   formatBackgroundFailureStatusObject,
   loadBackgroundFailureStatus,
 } from "../../hooks/background-failure-status.js"
@@ -312,12 +316,17 @@ async function handleStatus(services: LoreServices): Promise<ToolResult> {
     // same vault state. The `Kind != decision` exclusion that defines
     // the inbox is documented at `proposedMemoryFilter()` in
     // `src/core/memory.ts` — single authoritative explanation site.
-    const [tasks, proposedInbox, wakeUp] = await Promise.all([
+    const [tasks, proposedInbox, expiringScoped, wakeUp] = await Promise.all([
       taskStats(services.tasks, {
         projectId: project?.id,
         today: todayUtc(),
       }),
       loadProposedInboxStatus(services, { projectId: project?.id }),
+      // Issue #283 — surfaces expired/expiring/out-of-context scoped
+      // rows for cleanup. Mirrors the CLI `lore status` line so MCP
+      // callers (`lore-context action='status'`) get the same triage
+      // signal.
+      loadExpiringScopedStatus(services, { projectId: project?.id }),
       loadWakeUpData(services, {
         projectId: project?.id,
         includeMemoryContent: false,
@@ -327,6 +336,7 @@ async function handleStatus(services: LoreServices): Promise<ToolResult> {
     ])
     lines.push(...formatTaskSummary(tasks))
     lines.push(...formatProposedInboxStatus(proposedInbox))
+    lines.push(...formatExpiringScopedSummary(expiringScoped))
     if (wakeUp.coverage) {
       lines.push(...formatWakeUpCoverageReport(wakeUp.coverage))
     }

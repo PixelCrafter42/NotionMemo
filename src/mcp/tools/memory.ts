@@ -24,8 +24,9 @@ import type {
   SearchMode,
   SearchExplain,
 } from "../../types.js"
-import { SYNOPSIS_MAX } from "../../types.js"
+import { SYNOPSIS_MAX, memoryScopeToInput } from "../../types.js"
 import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { scopeInputSchema } from "./scope-schema.js"
 import { clearableYmdDateSchema, ymdDateSchema } from "./date-schema.js"
 import { nonBlankBody, nonBlankString } from "./text-schema.js"
 import { notionPageIdSchema } from "./notion-id-schema.js"
@@ -60,6 +61,7 @@ import {
   type PromotionAdvisory,
   type RecordComparedResult,
 } from "../../core/memory.js"
+import { scopesMatchForMerge } from "../../core/fact.js"
 import { CONFLICT_JUDGE_PROMPT_VERSION } from "../../core/prompts/conflict-judge.js"
 import type { TaskSummary } from "../../types.js"
 import { resolveAuthorForWrite } from "../../auth/identity.js"
@@ -316,6 +318,7 @@ interface SaveArgs {
   agent?: string
   session?: string
   topicKey?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolResult> {
@@ -556,6 +559,10 @@ async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolR
             session: args.session,
             reviewBy: args.reviewBy,
             decidedAt: args.decidedAt,
+            // Scope / lifetime — fresh-create branch lands the scope
+            // verbatim; append-revision branch silently preserves the
+            // existing row's scope. Issue #283.
+            scope: args.scope,
           })
           .then((result) => ({
             ...result,
@@ -579,6 +586,10 @@ async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolR
           author: resolvedAuthor,
           agent: args.agent,
           session: args.session,
+          // Scope / lifetime (issue #283). The Zod schema accepts the
+          // `MemoryScopeInput` shape verbatim; pass through as-is so the
+          // service layer translates it onto the Notion column writes.
+          scope: args.scope,
           autosaveLearningDedupScope,
           autosaveLearningScopeId: services.context.vault?.pageId ?? services.configRoot,
           prepareFreshCreate,
@@ -689,6 +700,13 @@ async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolR
         // `.status === 'fulfilled'` filter at the consumer; the
         // current shape lets the success/failure callbacks return
         // typed booleans the count operation can sum directly.
+        // Issue #283 review — system-managed `mentions` facts must
+        // carry the saved memory's scope so a session-scoped memory
+        // does not silently emit broadcast facts that surface to
+        // every reader via `lore-query action='ask'`. The conversion
+        // from `Memory.scope` (read shape) to `MemoryScopeInput`
+        // (write shape) lives in `types.ts:memoryScopeToInput`.
+        const factScope = memoryScopeToInput(memory.scope)
         const results = await Promise.all(
           mentionedEntities.map((entity) =>
             services.facts
@@ -699,6 +717,7 @@ async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolR
                 sourceMemoryId: memory.id,
                 projectIds,
                 confidence: "speculative",
+                scope: factScope,
               })
               .then(
                 () => true,
@@ -854,6 +873,7 @@ interface UpdateArgs {
   alternatives?: string
   consequences?: string
   topicKey?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 async function handleUpdate(
@@ -988,6 +1008,11 @@ async function handleUpdate(
           affectsIds: args.affectsIds,
           alternatives: args.alternatives,
           consequences: args.consequences,
+          // Scope / lifetime update (issue #283). Same `MemoryScopeInput`
+          // shape as save; absent fields leave columns untouched, explicit
+          // `null` clears select / date columns, empty strings clear
+          // rich_text columns.
+          scope: args.scope,
         })
       } catch (err) {
         if (
@@ -1166,6 +1191,14 @@ async function handleUpdate(
       try {
         existing = await services.facts.queryBySourceMemory(updated.id, {
           predicates: ["mentions"],
+          // Auto-mentions diff must see every mentions fact this
+          // memory has emitted, regardless of scope context — this is
+          // a write-side reconciliation, not an agent-facing read.
+          // Filtering by reader scope here would silently leave
+          // out-of-scope mentions facts orphaned when the memory is
+          // re-titled, defeating the whole point of the invalidate
+          // half (issue #283 + #491).
+          includeOutOfScope: true,
         })
       } catch (err) {
         // Probe failure must not block the update response.
@@ -1206,18 +1239,50 @@ async function handleUpdate(
         fact,
         decodedObject: decodeTextEntities(fact.object),
       }))
-      const covered = new Set(decodedExisting.map((e) => e.decodedObject))
+      // Issue #283 review — covered/stale must split on BOTH Object
+      // identity AND scope match. An existing fact whose decoded
+      // Object is still surfaced but whose scope no longer matches
+      // the post-update memory scope (because the operator
+      // re-scoped the source memory via `lore-memory action='update'`
+      // with `scope: { ... }`) needs to be invalidated AND re-emitted
+      // under the new scope, otherwise the fact stays at its
+      // original scope indefinitely and either leaks or hides under
+      // the new reader context. Without this branch, scope-only
+      // updates produce zero fact writes for Object-stable
+      // entities and the source memory's mentions facts become
+      // structurally desynchronized from the memory's identity slot.
+      const updatedScopeBundle = memoryScopeToInput(updated.scope)
+      // Issue #283 round-4 — reuse `scopesMatchForMerge` directly so
+      // the auto-mentions diff and `createWithDedup` cannot drift on
+      // the equality rule. Pre-fix the diff branch had a local
+      // `factScopeMatchesUpdate` helper duplicating the same
+      // contract; the round-3 review's "lockstep promise" called
+      // out the duplication, and round-4 collapses it onto the
+      // single shared helper.
+      const factScopeMatchesUpdate = (fact: import("../../types.js").Fact): boolean =>
+        scopesMatchForMerge(fact.scope ?? null, updatedScopeBundle)
+      const covered = new Set(
+        decodedExisting
+          .filter((e) => factScopeMatchesUpdate(e.fact))
+          .map((e) => e.decodedObject)
+      )
       const currentSet = new Set(mentionedEntities)
       const newCandidates = mentionedEntities.filter((entity) => !covered.has(entity))
       // Stale = existing facts whose decoded Object isn't surfaced
-      // by the post-update extraction. The set difference is
+      // by the post-update extraction OR whose scope no longer
+      // matches the post-update memory scope. The set difference is
       // structurally the inverse of the new-candidate filter; both
       // are derived from the same `covered` / `currentSet` pair —
       // both built in the decoded namespace — so a future refactor
       // can't desync them OR re-introduce the encoding asymmetry
-      // across the two filters.
+      // across the two filters. The scope-mismatch branch invalidates
+      // the existing fact so the create branch above re-emits it
+      // under the new scope.
       const staleFacts = decodedExisting
-        .filter((e) => !currentSet.has(e.decodedObject))
+        .filter(
+          (e) =>
+            !currentSet.has(e.decodedObject) || !factScopeMatchesUpdate(e.fact)
+        )
         .map((e) => e.fact)
       const autoProjectIds =
         updated.projectIds.length > 0 ? updated.projectIds : undefined
@@ -1243,6 +1308,24 @@ async function handleUpdate(
       autoMentionsAttempted = newCandidates.length
       staleInvalidatedAttempted = staleFacts.length
       if (newCandidates.length > 0 || staleFacts.length > 0) {
+        // Issue #283 review — propagate the post-update scope onto
+        // newly-emitted mentions facts. A `lore-memory action='update'`
+        // call that re-titles a session-scoped memory must produce
+        // mentions facts with the SAME session scope; otherwise the
+        // re-emit would land broadcast facts that leak across
+        // sessions.
+        //
+        // Re-scoping reconciliation: when scope itself changes on
+        // update, the diff branch above already invalidates every
+        // existing mentions fact whose Object no longer matches and
+        // re-emits with the post-update scope. For Object-stable
+        // entities, the dedup probe below sees the existing
+        // (broadcast or otherwise-scoped) fact and falls through to
+        // a fresh row under the new scope — see
+        // `scopesMatchForMerge`. The invalidate+create pair is what
+        // makes this work without an explicit "re-scope existing
+        // facts" pass.
+        const updatedFactScope = memoryScopeToInput(updated.scope)
         const createPromises = newCandidates.map((entity) =>
           services.facts
             .createWithDedup({
@@ -1252,6 +1335,7 @@ async function handleUpdate(
               sourceMemoryId: updated.id,
               projectIds: autoProjectIds,
               confidence: "speculative",
+              scope: updatedFactScope,
             })
             .then(
               () => ({ kind: "create" as const, ok: true }),
@@ -1483,7 +1567,10 @@ function validateAffectedMemoryId(input: CompareArgs): void {
  * same Notion-side failure and an operator needs to inspect manually.
  */
 function inconsistentCompareStateMessage(args: {
-  dispatchedFactId: string | undefined
+  // Issue #283 round-3 — `null` is the new "pair-scope rejected
+  // emission" sentinel; same render as the legacy `undefined`
+  // ("not-yet-set"). Both collapse to `"(none)"` in the message.
+  dispatchedFactId: string | null | undefined
   decrementedMemoryId: string
   compareNotesEntryToWriteA: string
   compareNotesEntryToWriteB: string
@@ -1556,7 +1643,15 @@ interface CompareResultInput {
   memoryA: { id: string; title: string }
   memoryB: { id: string; title: string }
   affectedMemoryId?: string
-  factId?: string
+  /**
+   * Issue #283 round-3 — `null` is the new "pair-scope rejected
+   * fact emission" signal. The compare verdict landed in Compare
+   * Notes on both rows but no broadcast-able derived fact was
+   * created. The renderer surfaces a one-line note when this
+   * fires so the operator knows the audit state is intact even
+   * though the fact graph wasn't updated.
+   */
+  factId?: string | null
   decremented?: boolean
   alreadyJudged: boolean
   /**
@@ -1823,10 +1918,17 @@ async function handleCompare(
     //    affected target throws" — runs BEFORE the dispatch helper so
     //    a non-decision pair never hits `decisions.supersede`.
     let dispatchResult: {
-      factId?: string
+      // Issue #283 round-3 — `factId` may be `null` when the
+      // pair-scope rule rejected fact emission. The compare verdict
+      // still landed in Compare Notes; the broadcast-able derived
+      // fact was skipped to avoid leaking the narrower row's title
+      // across the broader reader context. `factEmissionSkippedReason`
+      // carries an operator-facing description in that case.
+      factId?: string | null
       affectedMemoryId?: string
       affectedCompareNotes?: string
       decremented?: boolean
+      factEmissionSkippedReason?: string
     } = {}
 
     if (args.verdict === "supersedes" && loser!.kind !== "decision") {
@@ -2480,6 +2582,7 @@ const memoryDispatchSchema = z.discriminatedUnion("action", [
         "Must be kebab-case path like 'decision/jwt-auth' (lowercase, slash-separated, no leading/trailing slash)"
       )
       .optional(),
+    scope: scopeInputSchema,
   }),
   z.object({
     action: z.literal("update"),
@@ -2507,6 +2610,7 @@ const memoryDispatchSchema = z.discriminatedUnion("action", [
     // identical across save and update. See 0.9.0/#14 for the
     // re-key semantics.
     topicKey: z.string().regex(TOPIC_KEY_REGEX).optional(),
+    scope: scopeInputSchema,
   }),
   z.object({
     action: z.literal("archive"),
@@ -2784,6 +2888,7 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
           .describe(
             "(action='approve'/'reject') Optional reviewer name. Defaults to the engineer identity resolver (LORE_USER_NAME → users.me)."
           ),
+        scope: scopeInputSchema,
       },
     },
     async (args) => {

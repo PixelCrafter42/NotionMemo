@@ -10,15 +10,26 @@
  *    `queryBySubject` depends on every fact having the column populated;
  *    splitting it into a separate command would double the migration cost
  *    for no agent-visible benefit.
- * 2. Merge (opt-in via `--merge`): group live facts by their normalized key,
- *    pick the row with the latest `Review By` (ties broken by oldest
- *    `created_time`) as the canonical survivor, invalidate the others.
- *    History is preserved because `invalidate` only sets `Valid Until`.
+ * 2. Merge (opt-in via `--merge`): group live facts by their normalized key
+ *    AND scope/lifetime bundle (issue #283 round-3 review) so that
+ *    same-triple-different-scope rows are NOT collapsed. Pick the row
+ *    with the latest `Review By` (ties broken by oldest `created_time`)
+ *    as the canonical survivor per group, invalidate the others. History
+ *    is preserved because `invalidate` only sets `Valid Until`.
+ *
+ * Issue #283 round-3 review fix — pre-fix grouping was by `dedupKey`
+ * alone, which would collapse a `(triple, scope=team)` row and a
+ * `(triple, scope=session)` row into one survivor and invalidate the
+ * other. That directly contradicted the new `createWithDedup` rule
+ * that same-triple-different-scope rows are intentionally distinct.
+ * Grouping now keys on `(dedupKey, scopeKind, scopeKey, audience,
+ * lifetime, expiresAt)` so the migration is symmetric with the
+ * scope-aware merge contract on the create path.
  */
 
 import type { Client } from "@notionhq/client"
 import type { PageObjectResponse, UpdatePageParameters } from "@notionhq/client"
-import type { DatabaseRef } from "../types.js"
+import type { DatabaseRef, MemoryLifetime, MemoryScopeKind } from "../types.js"
 import {
   isFullPage,
   extractTitle,
@@ -157,19 +168,35 @@ export async function runFactDedupBackfill(
     }
   }
 
-  // Phase 2 — group live rows by key; invalidate all but the best survivor.
+  // Phase 2 — group live rows by key + scope/lifetime bundle; invalidate
+  // all but the best survivor per group. Issue #283 round-3 review:
+  // grouping on `dedupKey` alone would collapse same-triple-different-
+  // scope rows into one survivor and invalidate the others, destroying
+  // the narrow-scope assertion or hiding the broadcast assertion behind
+  // a session/agent/role key — both of which contradict the
+  // `createWithDedup` scope-aware merge contract that creates these
+  // rows as intentionally-distinct in the first place.
+  //
+  // The grouping key is `dedupKey | scopeKind | scopeKey | audience |
+  // lifetime | expiresAt` joined with `\x1F` (ASCII Unit Separator —
+  // same separator the dedup-key hash uses to make boundary collisions
+  // structurally impossible in normalized text). Empty/null scope
+  // values normalize to `""` so a row with all-null scope columns
+  // (pre-#283 / broadcast row) groups separately from any row that
+  // declares any scope component.
   const liveByKey = new Map<string, FactRow[]>()
   for (const row of rows) {
     if (row.validUntil) continue
-    const bucket = liveByKey.get(row.dedupKey) ?? []
+    const groupKey = computeFactGroupKey(row)
+    const bucket = liveByKey.get(groupKey) ?? []
     bucket.push(row)
-    liveByKey.set(row.dedupKey, bucket)
+    liveByKey.set(groupKey, bucket)
   }
 
   const plans: FactMergePlan[] = []
   const today = new Date().toISOString().split("T")[0]
 
-  for (const [dedupKey, bucket] of liveByKey) {
+  for (const [, bucket] of liveByKey) {
     if (bucket.length < 2) continue
 
     // Sort so the survivor sits at index 0:
@@ -190,7 +217,17 @@ export async function runFactDedupBackfill(
     const losers = sorted.slice(1)
 
     plans.push({
-      dedupKey,
+      // Issue #283 round-4 review — `FactMergePlan.dedupKey` is
+      // documented as the stable SHA-256 hash of the triple, NOT
+      // the composite scope-aware grouping key. Round-3 introduced
+      // `computeFactGroupKey(row)` which joins dedupKey+scope
+      // bundle into the Map key for grouping; that's structurally
+      // a different value from the hash. Returning the composite
+      // key would break programmatic consumers that index by
+      // dedupKey or compare against `computeFactDedupKey(triple)`.
+      // Use the survivor's stored DedupKey field, which holds the
+      // hash directly.
+      dedupKey: survivor.dedupKey,
       triple: {
         subject: survivor.subject,
         predicate: survivor.predicate,
@@ -238,6 +275,47 @@ interface FactRow {
   validUntil: string | null
   reviewBy: string | null
   createdTime: string
+  /**
+   * Scope/lifetime columns loaded for the issue #283 round-3 fix.
+   * Loaded as raw strings (not the typed `MemoryScope`) because the
+   * grouping key only needs string equality; lifting to the typed
+   * shape would force every loaded row through `pageToFact`-style
+   * extractors for no behavioral benefit.
+   */
+  scopeKind: MemoryScopeKind | null
+  scopeKey: string
+  audience: string
+  lifetime: MemoryLifetime | null
+  expiresAt: string | null
+}
+
+/**
+ * ASCII Unit Separator. Joins the seven scope-aware grouping
+ * components into the migration's group key. Same separator the
+ * `computeFactDedupKey` hash uses for the same reason — `\x1F`
+ * never appears in user-supplied text or in select-option names,
+ * so a boundary collision between `(scopeKind="session", key="A")`
+ * and `(scopeKind="sessio", key="nA")` is structurally
+ * impossible.
+ */
+const FACT_GROUP_KEY_SEP = "\x1F"
+
+/**
+ * Compute the migration's grouping key for `--dedup-keys --merge`.
+ * Two rows merge only when this key matches — i.e. same triple AND
+ * same scope/lifetime bundle. Empty / null scope components
+ * collapse to the empty string so a pre-#283 row (all-null scope
+ * columns) groups separately from any row declaring scope.
+ */
+function computeFactGroupKey(row: FactRow): string {
+  return [
+    row.dedupKey,
+    row.scopeKind ?? "",
+    row.scopeKey,
+    row.audience,
+    row.lifetime ?? "",
+    row.expiresAt ?? "",
+  ].join(FACT_GROUP_KEY_SEP)
 }
 
 async function listAllFacts(
@@ -259,6 +337,24 @@ async function listAllFacts(
       start_cursor: cursor,
     })
     for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+      // Issue #283 round-3 — load the scope/lifetime columns so the
+      // migration's grouping key can include them. Pre-#283 vaults
+      // that haven't run schema migration won't have these columns;
+      // `extractSelect` / `extractRichText` / `extractDate` all
+      // return their documented defaults on missing properties, so
+      // legacy rows just contribute "" everywhere and continue to
+      // group by `dedupKey` alone — preserving pre-#283 merge
+      // behavior on un-upgraded vaults.
+      const scopeKindProp = page.properties[FACT_PROPS.SCOPE_KIND]
+      const scopeKind =
+        scopeKindProp && scopeKindProp.type === "select" && scopeKindProp.select
+          ? (scopeKindProp.select.name as MemoryScopeKind)
+          : null
+      const lifetimeProp = page.properties[FACT_PROPS.LIFETIME]
+      const lifetime =
+        lifetimeProp && lifetimeProp.type === "select" && lifetimeProp.select
+          ? (lifetimeProp.select.name as MemoryLifetime)
+          : null
       rows.push({
         id: page.id,
         subject: extractTitle(page.properties[FACT_PROPS.SUBJECT]),
@@ -269,6 +365,11 @@ async function listAllFacts(
         validUntil: extractDate(page.properties[FACT_PROPS.VALID_UNTIL]),
         reviewBy: extractDate(page.properties[FACT_PROPS.REVIEW_BY]),
         createdTime: page.created_time,
+        scopeKind,
+        scopeKey: extractRichText(page.properties[FACT_PROPS.SCOPE_KEY]),
+        audience: extractRichText(page.properties[FACT_PROPS.AUDIENCE]),
+        lifetime,
+        expiresAt: extractDate(page.properties[FACT_PROPS.EXPIRES_AT]),
       })
     }
     cursor = response.has_more ? response.next_cursor ?? undefined : undefined
