@@ -497,6 +497,28 @@ Two-process split is load-bearing:
   child is logged to `[lore]` stderr and swallowed — the parent has
   already exited.
 
+Known exception under #475: the parent Stop path now derives the
+foreground's resolved `AuthSource` once per fire via
+`deriveStopAuthSource` (in `helpers.ts`) so both spawn paths apply
+the same env partition. This adds one `auth.json` `readFile` plus a
+dynamic import of `auth/ntn.js` to the parent's hot path for
+ntn-source operators (cached by ESM after the first call, so
+subsequent fires within the same process — which is rare since
+`lore hooks autosave` is a fresh process per Stop — pay only the
+disk read). Defensive try/catch falls back to the legacy every-key
+forward on rejection so the Stop path itself never gains a new
+failure mode. Per-source cost reflects `resolveAuth`'s priority
+walk: `NOTION_API_TOKEN`-source operators short-circuit at
+priority 1 with zero I/O; `LORE_NOTION_TOKEN`-source operators
+(priority 3) pay the same priority-2 `auth.json` read + `auth/ntn.js`
+dynamic import as ntn-source operators because the walk checks
+priority 2 first; `config-auth-token`-source operators (priority 4)
+pay both the priority-2 read AND fall through to the config field.
+The "in-the-millisecond" budget claim still holds (the readFile is
+small and the failure-to-resolve path is fast), and the "never
+initializes a Notion client" claim still holds — the new I/O is
+filesystem-only, not network.
+
 `scheduleAutoDigestSpawn` (in `digest-scheduler.ts`) is the parent-side
 fork helper; `handleAutoDigest` (in `helpers.ts`) is the child-side
 handler.

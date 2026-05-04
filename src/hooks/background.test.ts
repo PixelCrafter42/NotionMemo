@@ -87,6 +87,7 @@ import * as fs from "node:fs"
 import { RUNTIME_FORWARDED_KEYS } from "../auth/forwarded-env.js"
 import { spawnBackgroundSave } from "./background.js"
 import { getStateDir } from "./lock.js"
+import { withClearedRuntimeEnv } from "./test-utils.js"
 
 const openSyncMock = fs.openSync as unknown as ReturnType<typeof vi.fn>
 const writeSyncMock = fs.writeSync as unknown as ReturnType<typeof vi.fn>
@@ -121,9 +122,7 @@ describe("spawnBackgroundSave safeEnv (#188)", () => {
   // value carried in from the developer's shell doesn't leak into the
   // assertions. Restore on teardown so a CI runner re-using the
   // process for sibling tests sees the same env it started with.
-  let savedEnv: Partial<
-    Record<(typeof RUNTIME_FORWARDED_KEYS)[number], string | undefined>
-  >
+  const envGuard = withClearedRuntimeEnv(RUNTIME_FORWARDED_KEYS)
 
   beforeEach(() => {
     try {
@@ -133,11 +132,7 @@ describe("spawnBackgroundSave safeEnv (#188)", () => {
     }
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "lore-bg-test-")))
 
-    savedEnv = {}
-    for (const key of RUNTIME_FORWARDED_KEYS) {
-      savedEnv[key] = process.env[key]
-      delete process.env[key]
-    }
+    envGuard.install()
 
     spawnMock.mockReset()
     spawnMock.mockImplementation(() => fakeLiveChild())
@@ -146,14 +141,7 @@ describe("spawnBackgroundSave safeEnv (#188)", () => {
   })
 
   afterEach(() => {
-    for (const key of RUNTIME_FORWARDED_KEYS) {
-      const prior = savedEnv[key]
-      if (prior === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = prior
-      }
-    }
+    envGuard.restore()
     rmSync(tmpDir, { recursive: true, force: true })
     try {
       rmSync(getStateDir(), { recursive: true, force: true })
@@ -330,9 +318,7 @@ describe("spawnBackgroundSave authSource partition (#475)", () => {
   // explicitly accept token-in-env as part of their contract and
   // the child has no other way to land on the same source.
   let tmpDir: string
-  let savedEnv: Partial<
-    Record<(typeof RUNTIME_FORWARDED_KEYS)[number], string | undefined>
-  >
+  const envGuard = withClearedRuntimeEnv(RUNTIME_FORWARDED_KEYS)
 
   beforeEach(() => {
     try {
@@ -342,11 +328,7 @@ describe("spawnBackgroundSave authSource partition (#475)", () => {
     }
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "lore-bg-authsource-")))
 
-    savedEnv = {}
-    for (const key of RUNTIME_FORWARDED_KEYS) {
-      savedEnv[key] = process.env[key]
-      delete process.env[key]
-    }
+    envGuard.install()
 
     spawnMock.mockReset()
     spawnMock.mockImplementation(() => fakeLiveChild())
@@ -355,14 +337,7 @@ describe("spawnBackgroundSave authSource partition (#475)", () => {
   })
 
   afterEach(() => {
-    for (const key of RUNTIME_FORWARDED_KEYS) {
-      const prior = savedEnv[key]
-      if (prior === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = prior
-      }
-    }
+    envGuard.restore()
     rmSync(tmpDir, { recursive: true, force: true })
     try {
       rmSync(getStateDir(), { recursive: true, force: true })
