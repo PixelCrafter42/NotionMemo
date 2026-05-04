@@ -132,6 +132,20 @@ export const MEMORY_PROPS = {
   SUPERSEDES: "Supersedes",
   AFFECTS: "Affects",
   COMPARED_WITH: "Compared With",
+  // Scope / lifetime (issue #283). Five columns added together so a
+  // schema-drift caller sees the whole feature land or none of it.
+  // `Scope Kind` and `Lifetime` are select columns whose options match
+  // the `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` enums in
+  // `src/types.ts`. `Scope Key` and `Audience` are free-form rich_text
+  // (scope keys are session ids, agent canonical names, role labels —
+  // a closed select would force a schema migration on every new
+  // session). `Expires At` is a Notion `date` so the retrieval filter
+  // can use `on_or_after` semantics without parsing.
+  SCOPE_KIND: "Scope Kind",
+  SCOPE_KEY: "Scope Key",
+  AUDIENCE: "Audience",
+  LIFETIME: "Lifetime",
+  EXPIRES_AT: "Expires At",
 } as const
 
 /**
@@ -290,6 +304,41 @@ export function memoriesProperties(
     // caps at 2000 per block which is the hard ceiling.
     [MEMORY_PROPS.SYNOPSIS]: { rich_text: {} },
     [MEMORY_PROPS.SESSION]: { rich_text: {} },
+    // Scope / lifetime (issue #283). Select option lists must stay in
+    // lockstep with `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` in
+    // `src/types.ts` — the schema-drift test pins the enum-to-options
+    // mapping. Adding a new value requires updating both files in the
+    // same change so an option missing from Notion doesn't surface as
+    // a `validation_error` on first write.
+    [MEMORY_PROPS.SCOPE_KIND]: {
+      select: {
+        options: [
+          { name: "team", color: "blue" },
+          { name: "project", color: "green" },
+          { name: "user", color: "yellow" },
+          { name: "agent", color: "purple" },
+          { name: "role", color: "orange" },
+          { name: "session", color: "pink" },
+          { name: "run", color: "red" },
+          { name: "environment", color: "brown" },
+          { name: "global", color: "gray" },
+        ],
+      },
+    },
+    [MEMORY_PROPS.SCOPE_KEY]: { rich_text: {} },
+    [MEMORY_PROPS.AUDIENCE]: { rich_text: {} },
+    [MEMORY_PROPS.LIFETIME]: {
+      select: {
+        options: [
+          { name: "persistent", color: "default" },
+          { name: "expires", color: "yellow" },
+          { name: "session-only", color: "pink" },
+          { name: "until-task-closed", color: "orange" },
+          { name: "until-decision-superseded", color: "blue" },
+        ],
+      },
+    },
+    [MEMORY_PROPS.EXPIRES_AT]: { date: {} },
   }
 
   if (memoriesDsId) {
@@ -456,6 +505,15 @@ export const FACT_PROPS = {
   SUBJECT_KEY: "SubjectKey",
   SUBJECT_ENTITY: "SubjectEntity",
   OBJECT_ENTITY: "ObjectEntity",
+  // Scope / lifetime (issue #283). Mirrors the Memories DB columns so
+  // facts about a session-scoped piece of work can carry the same
+  // identity slot — `lore-fact action='create'` accepts a scope bundle
+  // that matches the source memory's scope.
+  SCOPE_KIND: "Scope Kind",
+  SCOPE_KEY: "Scope Key",
+  AUDIENCE: "Audience",
+  LIFETIME: "Lifetime",
+  EXPIRES_AT: "Expires At",
 } as const
 
 /**
@@ -572,6 +630,40 @@ export function factsProperties(
         data_source_id: entitiesDsId,
       },
     },
+    // Scope / lifetime (issue #283). Select option lists mirror the
+    // Memories DB columns one-for-one — a scope expansion in
+    // `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` flows to both DBs by
+    // updating both schema builders in lockstep. The schema-drift test
+    // pins the option set against the enums.
+    [FACT_PROPS.SCOPE_KIND]: {
+      select: {
+        options: [
+          { name: "team", color: "blue" },
+          { name: "project", color: "green" },
+          { name: "user", color: "yellow" },
+          { name: "agent", color: "purple" },
+          { name: "role", color: "orange" },
+          { name: "session", color: "pink" },
+          { name: "run", color: "red" },
+          { name: "environment", color: "brown" },
+          { name: "global", color: "gray" },
+        ],
+      },
+    },
+    [FACT_PROPS.SCOPE_KEY]: { rich_text: {} },
+    [FACT_PROPS.AUDIENCE]: { rich_text: {} },
+    [FACT_PROPS.LIFETIME]: {
+      select: {
+        options: [
+          { name: "persistent", color: "default" },
+          { name: "expires", color: "yellow" },
+          { name: "session-only", color: "pink" },
+          { name: "until-task-closed", color: "orange" },
+          { name: "until-decision-superseded", color: "blue" },
+        ],
+      },
+    },
+    [FACT_PROPS.EXPIRES_AT]: { date: {} },
   }
 }
 
@@ -826,6 +918,19 @@ export function buildMemoryProps(input: {
   revisionCount?: number
   comparedWith?: string[]
   compareNotes?: string
+  /**
+   * Scope / lifetime fields (issue #283). Each carries clear-cell
+   * semantics: `undefined` leaves the column untouched, `null` (for
+   * select / date columns) clears the column, an empty string (for
+   * rich_text columns) clears the column. Service-layer write paths
+   * normalize the `MemoryScopeInput` shape into these primitives so
+   * `buildMemoryProps` doesn't need to know about the bundle.
+   */
+  scopeKind?: string | null
+  scopeKey?: string
+  audience?: string
+  lifetime?: string | null
+  expiresAt?: string | null
 }): PageProperties {
   const props: PageProperties = {
     [MEMORY_PROPS.TITLE]: { title: [{ text: { content: input.title } }] },
@@ -960,6 +1065,34 @@ export function buildMemoryProps(input: {
       rich_text: encodeCompareNotesRichText(input.compareNotes),
     }
   }
+  // Scope / lifetime (issue #283). Tristate semantics on the select +
+  // date columns mirror `confidenceScore` / `reviewBy` / `doneAt`:
+  // `undefined` leaves the column untouched, `null` clears, a value
+  // writes verbatim. Rich_text columns (`scopeKey`, `audience`) follow
+  // the existing rich_text precedent on this builder — `undefined`
+  // leaves untouched, an empty string writes through (the explicit
+  // clear path on rich_text). Service-layer normalization in
+  // `MemoryService` collapses the higher-level `MemoryScopeInput`
+  // shape onto these primitives so the builder's surface stays one
+  // primitive per Notion column.
+  if (input.scopeKind !== undefined) {
+    props[MEMORY_PROPS.SCOPE_KIND] =
+      input.scopeKind === null ? { select: null } : { select: { name: input.scopeKind } }
+  }
+  if (input.scopeKey !== undefined) {
+    props[MEMORY_PROPS.SCOPE_KEY] = { rich_text: [{ text: { content: input.scopeKey } }] }
+  }
+  if (input.audience !== undefined) {
+    props[MEMORY_PROPS.AUDIENCE] = { rich_text: [{ text: { content: input.audience } }] }
+  }
+  if (input.lifetime !== undefined) {
+    props[MEMORY_PROPS.LIFETIME] =
+      input.lifetime === null ? { select: null } : { select: { name: input.lifetime } }
+  }
+  if (input.expiresAt !== undefined) {
+    props[MEMORY_PROPS.EXPIRES_AT] =
+      input.expiresAt === null ? { date: null } : { date: { start: input.expiresAt } }
+  }
   return props
 }
 
@@ -1033,6 +1166,12 @@ export function buildFactProps(input: {
   subjectKey?: string
   subjectEntityId?: string
   objectEntityId?: string
+  /** Scope / lifetime (issue #283). Same tristate semantics as `buildMemoryProps`. */
+  scopeKind?: string | null
+  scopeKey?: string
+  audience?: string
+  lifetime?: string | null
+  expiresAt?: string | null
 }): PageProperties {
   const props: PageProperties = {
     [FACT_PROPS.SUBJECT]: { title: [{ text: { content: input.subject } }] },
@@ -1093,6 +1232,27 @@ export function buildFactProps(input: {
     props[FACT_PROPS.OBJECT_ENTITY] = {
       relation: [{ id: input.objectEntityId }],
     }
+  }
+  // Scope / lifetime (issue #283). See `buildMemoryProps` for the
+  // tristate semantics rationale; the Facts DB columns mirror Memories
+  // one-for-one so the write path is identical.
+  if (input.scopeKind !== undefined) {
+    props[FACT_PROPS.SCOPE_KIND] =
+      input.scopeKind === null ? { select: null } : { select: { name: input.scopeKind } }
+  }
+  if (input.scopeKey !== undefined) {
+    props[FACT_PROPS.SCOPE_KEY] = { rich_text: [{ text: { content: input.scopeKey } }] }
+  }
+  if (input.audience !== undefined) {
+    props[FACT_PROPS.AUDIENCE] = { rich_text: [{ text: { content: input.audience } }] }
+  }
+  if (input.lifetime !== undefined) {
+    props[FACT_PROPS.LIFETIME] =
+      input.lifetime === null ? { select: null } : { select: { name: input.lifetime } }
+  }
+  if (input.expiresAt !== undefined) {
+    props[FACT_PROPS.EXPIRES_AT] =
+      input.expiresAt === null ? { date: null } : { date: { start: input.expiresAt } }
   }
   return props
 }

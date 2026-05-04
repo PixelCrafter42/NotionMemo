@@ -22,6 +22,7 @@ import {
 } from "../render.js"
 import { clearableYmdDateSchema } from "./date-schema.js"
 import { nonBlankString } from "./text-schema.js"
+import { scopeInputSchema } from "./scope-schema.js"
 
 import type { Decision, Fact, TaskSummary } from "../../types.js"
 import { taskDaysOverdue } from "../../core/task.js"
@@ -311,6 +312,7 @@ interface LearnArgs {
   sourceMemoryId?: string
   session?: string
   agent?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 export async function handleLearn(
@@ -489,6 +491,8 @@ export async function handleLearn(
       sourceMemoryId: effectiveSource,
       subjectEntityId,
       objectEntityId,
+      // Scope / lifetime (issue #283).
+      scope: args.scope,
     })
 
     const verb = !deduped
@@ -1210,6 +1214,7 @@ const factDispatchSchema = z
       sourceMemoryId: z.string().optional(),
       session: z.string().optional(),
       agent: z.string().optional(),
+      scope: scopeInputSchema,
     }),
     z.object({
       action: z.literal("invalidate"),
@@ -1310,6 +1315,7 @@ export function registerKnowledgeTools(server: McpServer, services: LoreServices
           .describe(
             "Required for action='invalidate' and action='extend'. The fact's page ID."
           ),
+        scope: scopeInputSchema,
       },
     },
     async (args) => {

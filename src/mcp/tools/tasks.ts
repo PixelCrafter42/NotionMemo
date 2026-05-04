@@ -23,6 +23,7 @@ import {
 } from "../helpers.js"
 import { resolveProjectIds, resolveReadProjectScope } from "../resolve.js"
 import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { scopeInputSchema } from "./scope-schema.js"
 import { taskDaysOverdue } from "../../core/task.js"
 import {
   findDuplicateActiveTasks,
@@ -181,6 +182,7 @@ interface CreateArgs {
   author?: string
   agent?: string
   session?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 /**
@@ -409,6 +411,8 @@ async function handleCreate(
       author: resolvedAuthor,
       agent: args.agent,
       session: args.session,
+      // Scope / lifetime (issue #283).
+      scope: args.scope,
     })
 
     // The probe ran before create, so by construction `task.id` cannot
@@ -500,6 +504,7 @@ interface UpdateArgs {
   tags?: string[]
   keywords?: string
   synopsis?: string
+  scope?: import("../../types.js").MemoryScopeInput
 }
 
 async function handleUpdate(
@@ -537,6 +542,8 @@ async function handleUpdate(
       tags: args.tags,
       keywords: args.keywords,
       synopsis: args.synopsis,
+      // Scope / lifetime update (issue #283).
+      scope: args.scope,
     })
 
     const lines = [
@@ -851,6 +858,7 @@ const taskDispatchSchema = z.discriminatedUnion("action", [
     author: z.string().optional(),
     agent: z.string().optional(),
     session: z.string().optional(),
+    scope: scopeInputSchema,
   }),
   z.object({
     action: z.literal("update"),
@@ -864,6 +872,7 @@ const taskDispatchSchema = z.discriminatedUnion("action", [
     tags: tagsSchema.optional(),
     keywords: keywordsSchema.optional(),
     synopsis: z.string().max(SYNOPSIS_MAX).optional(),
+    scope: scopeInputSchema,
   }),
   z.object({
     action: z.literal("close"),
@@ -1092,6 +1101,7 @@ export function registerTaskTools(server: McpServer, services: LoreServices): vo
               "pre-DEFERRED-01 output for callers piping the response into " +
               "another formatter."
           ),
+        scope: scopeInputSchema,
       },
     },
     async (args) => {

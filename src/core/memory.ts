@@ -29,14 +29,18 @@ import type {
   MemoryKind,
   MemoryStatus,
   MemoryConfidence,
+  MemoryScopeContext,
+  MemoryScopeInput,
   TaskState,
   DatabaseRef,
   FreshCreatePreparation,
 } from "../types.js"
 import {
   CONFIDENCE_DISPLAY_THRESHOLD,
+  EXPIRING_SOON_DAYS,
   MS_PER_DAY,
   STALE_CONFIDENCE_DAYS,
+  pairScopeForFactEmission,
 } from "../types.js"
 import {
   buildMemoryProps,
@@ -46,7 +50,7 @@ import {
   type CompareNotesTextChunk,
 } from "../notion/schema.js"
 import { isMissingPropertyError } from "../notion/errors.js"
-import { projectOrUnscopedFilter } from "../notion/filters.js"
+import { projectOrUnscopedFilter, withDefaultScopeFilter } from "../notion/filters.js"
 import { decodeTextEntities } from "../notion/html-entities.js"
 import { fixMemoryEncoding, type MemoryEncodingReport } from "./memory-encoding.js"
 import { normalizeAgents, type AgentNormalizationReport } from "./agent-normalization.js"
@@ -116,6 +120,108 @@ function autosaveLearningPostCreateStabilizeMs(): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Translate the agent-facing `MemoryScopeInput` bundle into the flat
+ * primitive shape `buildMemoryProps` / `buildFactProps` consume. The
+ * builders themselves stay one-primitive-per-Notion-column so the
+ * write path is identical regardless of which surface produced the
+ * scope (CLI, MCP, or internal migration).
+ *
+ * `undefined` input → `undefined` outputs across the board (no
+ * column writes). Spread the result into the builder call so omitted
+ * scopes leave the caller's surface untouched.
+ *
+ * Issue #283.
+ */
+function scopeInputToBuilderProps(
+  scope: MemoryScopeInput | undefined
+): {
+  scopeKind?: string | null
+  scopeKey?: string
+  audience?: string
+  lifetime?: string | null
+  expiresAt?: string | null
+} {
+  if (scope === undefined) return {}
+  const out: ReturnType<typeof scopeInputToBuilderProps> = {}
+  if (scope.kind !== undefined) out.scopeKind = scope.kind
+  if (scope.key !== undefined) out.scopeKey = scope.key
+  if (scope.audience !== undefined) out.audience = scope.audience
+  if (scope.lifetime !== undefined) out.lifetime = scope.lifetime
+  if (scope.expiresAt !== undefined) out.expiresAt = scope.expiresAt
+  return out
+}
+
+/**
+ * Client-side mirror of the server-side default scope inclusion
+ * filter (issue #283). Used by `applySemanticPostFilters` because
+ * `client.search` has no property-filter support — the same logic
+ * runs server-side on `dataSources.query` paths via
+ * `withDefaultScopeFilter`.
+ *
+ * Returns `true` when the row passes the default scope filter:
+ * - Scope Kind empty / `team` / `project` / `global` (broadcast); OR
+ * - Scope Kind is one of the narrow kinds AND Scope Key equals the
+ *   reader's resolved context value for that kind.
+ *
+ * AND not expired:
+ * - Expires At empty OR Expires At >= today.
+ *
+ * Pure function over the page's already-fetched properties. Mirrors
+ * the server-side filter shape exactly so a future contributor
+ * tightening one MUST tighten the other in lockstep.
+ */
+export function matchesDefaultScope(
+  props: PageObjectResponse["properties"],
+  ctx: MemoryScopeContext,
+  today: string,
+  scopeProps: import("../notion/filters.js").ScopeFilterProps = {
+    scopeKind: MEMORY_PROPS.SCOPE_KIND,
+    scopeKey: MEMORY_PROPS.SCOPE_KEY,
+    expiresAt: MEMORY_PROPS.EXPIRES_AT,
+  }
+): boolean {
+  // Expiry check first — cheap, no scope-context lookup.
+  const expiresAt = extractDate(props[scopeProps.expiresAt])
+  if (expiresAt !== null && expiresAt < today) return false
+
+  const kindProp = props[scopeProps.scopeKind]
+  const kind =
+    kindProp && kindProp.type === "select" && kindProp.select
+      ? kindProp.select.name
+      : null
+  if (kind === null) return true
+  if (kind === "team" || kind === "project" || kind === "global") return true
+
+  const key = extractRichText(props[scopeProps.scopeKey])
+  if (key.length === 0) return false
+
+  switch (kind) {
+    case "user":
+      return ctx.userId === key
+    case "agent":
+      return ctx.agent === key
+    case "role":
+      return ctx.role === key
+    case "session":
+      return ctx.session === key
+    case "run":
+      return ctx.run === key
+    case "environment":
+      return ctx.environment === key
+    default:
+      // Unknown kind value — fail closed. The server-side filter has
+      // no clause for an unrecognized `Scope Kind` select option, so
+      // the row is dropped on the contains lane; the semantic post-
+      // filter must mirror that behavior or callers see asymmetric
+      // results across the two lanes. This is a defensive guard
+      // against schema drift (someone manually adding a Notion
+      // select option that the type system doesn't know about); the
+      // documented kinds always hit one of the cases above.
+      return false
+  }
 }
 
 /**
@@ -1453,10 +1559,60 @@ export class MemoryService {
     { cacheNegatives: true }
   )
 
+  /**
+   * Resolved scope context for this process (issue #283). Threaded
+   * into every default-retrieval path so default reads exclude
+   * narrow-scope rows whose `scopeKey` does not match the reader's
+   * matching identity slot. A missing context (default `{}`) means
+   * "no narrow scopes ever surface" — only broadcast scopes plus
+   * pre-#283 rows. Production callers populate this in
+   * `initServices` from environment variables, the active project,
+   * and the auth identity; tests default to empty.
+   */
+  private scopeCtx: MemoryScopeContext = {}
+
+  /**
+   * Whether default-retrieval paths should apply the issue #283
+   * scope filter. Opt-in: a caller that constructs `MemoryService`
+   * without an explicit `scopeCtx` argument gets pre-#283 retrieval
+   * shape (no scope clause, no expiry clause). Production
+   * `initServicesFromConfig` always passes a context (possibly
+   * empty), turning the filter on for every real-vault read.
+   * Tests construct services without scope context and stay on the
+   * pre-existing shape unless they explicitly opt in via
+   * `setScopeContext`.
+   */
+  private scopeFilterEnabled = false
+
   constructor(
     private client: Client,
-    private db: DatabaseRef
-  ) {}
+    private db: DatabaseRef,
+    scopeCtx?: MemoryScopeContext
+  ) {
+    if (scopeCtx) {
+      this.scopeCtx = scopeCtx
+      this.scopeFilterEnabled = true
+    }
+  }
+
+  /**
+   * Replace the scope context after construction. Used by tests and
+   * by the `initServices` seam when scope context resolution depends
+   * on Notion calls that can't run synchronously in the constructor.
+   * Calling this enables the scope filter on subsequent reads.
+   */
+  setScopeContext(ctx: MemoryScopeContext): void {
+    this.scopeCtx = ctx
+    this.scopeFilterEnabled = true
+  }
+
+  /** Snapshot of the active scope context. Read-only — callers
+   * cannot mutate it. Threaded into MCP audit responses so an
+   * operator triaging "why don't I see this row?" can confirm
+   * which identity slots resolved. */
+  getScopeContext(): Readonly<MemoryScopeContext> {
+    return this.scopeCtx
+  }
 
   private isMemoryPageParent(parent: PageObjectResponse["parent"]): boolean {
     if (parent.type === "database_id") {
@@ -1644,6 +1800,7 @@ export class MemoryService {
         entity: decoded.entity,
         topicKey: input.topicKey,
         revisionCount: input.revisionCount,
+        ...scopeInputToBuilderProps(input.scope),
       }),
     })
 
@@ -2065,6 +2222,13 @@ export class MemoryService {
     reviewBy?: string
     decidedAt?: string
     today?: string
+    /**
+     * Scope / lifetime declaration (issue #283). On fresh-create the
+     * scope columns land verbatim; on append-revision the scope is
+     * silently preserved (revisions inherit the head row's scope —
+     * agents change scope through `lore-memory action='update'`).
+     */
+    scope?: MemoryScopeInput
   }): Promise<{
     memory: Memory
     revisionCount: number
@@ -2105,6 +2269,10 @@ export class MemoryService {
         decidedAt: input.decidedAt,
         topicKey: input.topicKey,
         revisionCount: 1,
+        // Scope / lifetime is preserved verbatim on fresh-create;
+        // append-revision intentionally skips the scope write below
+        // because revisions inherit the head row's scope.
+        scope: input.scope,
       })
       // Fresh-create never returns a promotion advisory in 0.9.0. The
       // advisory is specifically about revision-chain accumulation; a
@@ -3050,6 +3218,42 @@ export class MemoryService {
         rich_text: [{ text: { content: decoded.entity } }],
       }
     }
+    // Scope / lifetime (issue #283). Mirror the `buildMemoryProps`
+    // tristate semantics in the inlined update path so the column
+    // writes are consistent across `create` and `update`. The update
+    // path inlines the property writes (rather than calling
+    // `buildMemoryProps`) because Notion's `pages.update` is a
+    // partial update — we only emit columns the caller actually
+    // touched.
+    if (input.scope !== undefined) {
+      const scope = input.scope
+      if (scope.kind !== undefined) {
+        props[MEMORY_PROPS.SCOPE_KIND] =
+          scope.kind === null ? { select: null } : { select: { name: scope.kind } }
+      }
+      if (scope.key !== undefined) {
+        props[MEMORY_PROPS.SCOPE_KEY] = {
+          rich_text: [{ text: { content: scope.key } }],
+        }
+      }
+      if (scope.audience !== undefined) {
+        props[MEMORY_PROPS.AUDIENCE] = {
+          rich_text: [{ text: { content: scope.audience } }],
+        }
+      }
+      if (scope.lifetime !== undefined) {
+        props[MEMORY_PROPS.LIFETIME] =
+          scope.lifetime === null
+            ? { select: null }
+            : { select: { name: scope.lifetime } }
+      }
+      if (scope.expiresAt !== undefined) {
+        props[MEMORY_PROPS.EXPIRES_AT] =
+          scope.expiresAt === null
+            ? { date: null }
+            : { date: { start: scope.expiresAt } }
+      }
+    }
 
     let propertiesApplied = false
     if (Object.keys(props).length > 0) {
@@ -3790,6 +3994,83 @@ export class MemoryService {
   }
 
   /**
+   * Operator-facing counters for the `lore status` expiring/expired
+   * scoped-memory surface (issue #283 acceptance criterion).
+   *
+   * Returns three counts:
+   * - `expired`: rows whose `Expires At < today` and whose page is
+   *   not archived. Already invisible to default reads — surfaced
+   *   here so an operator can run `lore-memory action='archive'` to
+   *   actually clean them up.
+   * - `expiringSoon`: rows with `Expires At` in the inclusive window
+   *   `[today, today + EXPIRING_SOON_DAYS]`. The "expiring this
+   *   week" triage signal — agents whose memories are about to drop
+   *   out of recall get an audit nudge.
+   * - `narrowScopeOutOfContext`: count of rows whose Scope Kind is
+   *   one of the narrow kinds (`user` / `agent` / `role` / `session`
+   *   / `run` / `environment`) AND whose Scope Key does NOT match
+   *   the current resolved scope context. This is the "session-
+   *   scoped notes outliving their session" signal — the load-
+   *   bearing acceptance criterion that #283 exists to make
+   *   visible.
+   *
+   * Single paginated walk via `listAllForBackfill`, project-scoped
+   * when `projectId` is provided. Counts archived rows out (the
+   * walker already filters them).
+   */
+  async expiringScopedStats(opts: { projectId?: string } = {}): Promise<{
+    expired: number
+    expiringSoon: number
+    narrowScopeOutOfContext: number
+  }> {
+    const today = todayUtc()
+    const horizonMs =
+      Date.parse(today) +
+      // EXPIRING_SOON_DAYS is the days-ahead horizon. We need it in
+      // ms to compare YYYY-MM-DD strings; render the shifted Date
+      // back to the same format via `.toISOString().slice(0, 10)`.
+      EXPIRING_SOON_DAYS * MS_PER_DAY
+    const horizon = new Date(horizonMs).toISOString().slice(0, 10)
+    let expired = 0
+    let expiringSoon = 0
+    let narrowScopeOutOfContext = 0
+    const ctx = this.scopeCtx
+    for await (const memory of this.listAllForBackfill(opts)) {
+      const scope = memory.scope ?? null
+      if (scope === null) continue
+      const expiresAt = scope.expiresAt
+      if (expiresAt !== null) {
+        if (expiresAt < today) {
+          expired += 1
+        } else if (expiresAt <= horizon) {
+          expiringSoon += 1
+        }
+      }
+      const kind = scope.kind
+      if (kind === null) continue
+      if (kind === "team" || kind === "project" || kind === "global") continue
+      const expected =
+        kind === "user"
+          ? ctx.userId
+          : kind === "agent"
+            ? ctx.agent
+            : kind === "role"
+              ? ctx.role
+              : kind === "session"
+                ? ctx.session
+                : kind === "run"
+                  ? ctx.run
+                  : kind === "environment"
+                    ? ctx.environment
+                    : undefined
+      if (expected === undefined || scope.key !== expected) {
+        narrowScopeOutOfContext += 1
+      }
+    }
+    return { expired, expiringSoon, narrowScopeOutOfContext }
+  }
+
+  /**
    * Count non-archived `Kind != decision` memories whose `Status =
    * proposed` — the proposed-memory review inbox primitive backing
    * the `lore status` and `lore-context action='status'` inbox-count
@@ -4258,6 +4539,17 @@ export class MemoryService {
      * contents under the assumption the query shape is unchanged.
      */
     startCursor?: string
+    /**
+     * When `true`, skip the default scope filter (issue #283) — every
+     * scope kind surfaces, expired rows surface, and the resolved
+     * `MemoryScopeContext` is ignored. Defaults to `false`.
+     *
+     * Operator-facing audit paths (`lore status` expiring-rows
+     * surface, conflict scan, near-duplicate probe pool) opt in.
+     * Agent-facing recall paths leave it unset so a session-scoped
+     * row from another session never leaks into default retrieval.
+     */
+    includeOutOfScope?: boolean
   }): Promise<{ items: Memory[]; nextCursor?: string; capped: boolean }> {
     const filters: Array<Record<string, unknown>> = []
 
@@ -4372,13 +4664,36 @@ export class MemoryService {
     // restored from Notion's trash would surface in recall, wake-up,
     // and the dedup post-filter would have to catch it after
     // `MemoryService.list` had already consumed candidate-pool slots.
-    const filter = withCleanupOrphanExclusion(baseFilter)
+    //
+    // Default scope filter (issue #283). Composed before the orphan
+    // exclusion so both clauses live in the same top-level `and`.
+    // `includeOutOfScope: true` skips the scope clause for audit
+    // paths (`lore status` expiring-rows surface, conflict scanner,
+    // near-duplicate probe pool).
+    const scopedFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, todayUtc())
+    const filter = withCleanupOrphanExclusion(scopedFilter)
 
     const limit = Math.min(opts?.limit ?? 20, 100)
     if (limit <= 0) {
       return { items: [], nextCursor: opts?.startCursor, capped: false }
     }
 
+    // Issue #283 — Notion's compound-filter language caps nesting at
+    // 2 levels, so `defaultScopeInclusionFilter` emits a server-side
+    // shape that includes the reader's narrow kinds without binding
+    // each kind to its key. The kind+key binding runs client-side via
+    // `matchesDefaultScope` here. The walker over-fetches by the
+    // slots dropped on the client side; backfilled pagination keeps
+    // the result at the caller's requested limit.
+    const today = todayUtc()
+    const applyExtraFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, today)
     const result = await collectLivePages({
       limit,
       startCursor: opts?.startCursor,
@@ -4396,6 +4711,7 @@ export class MemoryService {
           page_size,
           start_cursor,
         }),
+      extraFilter: applyExtraFilter,
     })
 
     if (opts?.includeContent === false) {
@@ -4679,9 +4995,29 @@ export class MemoryService {
     // server-side so a restored-from-trash orphan does not consume a
     // contains-lane slot and silently saturate the
     // `HYBRID_FALLBACK_THRESHOLD` cutoff, masking real semantic hits.
-    const filter = withCleanupOrphanExclusion(baseFilter)
+    //
+    // Default scope filter (issue #283). Same posture as `list` —
+    // narrow-scope rows whose `scopeKey` doesn't match the reader's
+    // identity slot drop out of the contains lane by default.
+    const scopedFilter =
+      input.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, todayUtc())
+    const filter = withCleanupOrphanExclusion(scopedFilter)
 
     if (limit <= 0) return { pages: [], capped: false }
+
+    // Issue #283 — kind+key binding runs client-side here too. See
+    // `MemoryService.list`'s comment for the rationale (Notion's
+    // 2-deep compound-filter limit makes server-side narrow binding
+    // structurally impossible; the walker backfills via
+    // `extraFilter`).
+    const containsToday = todayUtc()
+    const containsExtraFilter =
+      input.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, containsToday)
 
     const result = await collectLivePages({
       limit,
@@ -4696,6 +5032,7 @@ export class MemoryService {
           page_size,
           start_cursor,
         }),
+      extraFilter: containsExtraFilter,
     })
     if (result.capped) {
       warnLivePageCapFired({
@@ -5105,6 +5442,19 @@ export class MemoryService {
       // posture as the kind / status exact-match filters above.
       // Explicit `input.status` short-circuits this branch.
       filtered = filtered.filter(isNotReviewTerminalStatus)
+    }
+
+    // Default scope filter (issue #283). Same posture as the
+    // contains lane's server-side scope filter — `client.search` has
+    // no property-filter support so the exclusion runs client-side.
+    // `includeOutOfScope: true` opts out for audit paths; the filter
+    // also no-ops when `scopeFilterEnabled` is false (tests
+    // constructing the service without a scope context).
+    if (input.includeOutOfScope !== true && this.scopeFilterEnabled) {
+      const today = todayUtc()
+      filtered = filtered.filter((page) =>
+        matchesDefaultScope(page.properties, this.scopeCtx, today)
+      )
     }
 
     return filtered
@@ -5552,7 +5902,48 @@ export function pageToMemory(page: PageObjectResponse, content?: string): Memory
     revisionCount: extractNumber(props[MEMORY_PROPS.REVISION_COUNT]) ?? 1,
     comparedWith: extractRelationIds(props[MEMORY_PROPS.COMPARED_WITH]),
     compareNotes: extractRichText(props[MEMORY_PROPS.COMPARE_NOTES]),
+    scope: extractMemoryScope(props),
   }
+}
+
+/**
+ * Read the five scope columns into a `MemoryScope` bundle. Returns
+ * `null` when the row predates issue #283 — defined as "all five
+ * columns are empty/missing." Pre-#283 vaults that have run the
+ * schema migration but haven't backfilled scope still pass through
+ * this branch; default retrieval treats null scope as broadcast.
+ *
+ * Returns a populated `MemoryScope` with `kind: null` / `lifetime:
+ * null` when only one column has been written (e.g. an operator set
+ * `Lifetime` on a row but left `Scope Kind` empty) — same surface as
+ * a row that's mid-#283 migration.
+ */
+function extractMemoryScope(
+  props: PageObjectResponse["properties"]
+): import("../types.js").MemoryScope | null {
+  const kindProp = props[MEMORY_PROPS.SCOPE_KIND]
+  const kind =
+    kindProp && kindProp.type === "select" && kindProp.select
+      ? (kindProp.select.name as import("../types.js").MemoryScopeKind)
+      : null
+  const key = extractRichText(props[MEMORY_PROPS.SCOPE_KEY])
+  const audience = extractRichText(props[MEMORY_PROPS.AUDIENCE])
+  const lifetimeProp = props[MEMORY_PROPS.LIFETIME]
+  const lifetime =
+    lifetimeProp && lifetimeProp.type === "select" && lifetimeProp.select
+      ? (lifetimeProp.select.name as import("../types.js").MemoryLifetime)
+      : null
+  const expiresAt = extractDate(props[MEMORY_PROPS.EXPIRES_AT])
+  if (
+    kind === null &&
+    lifetime === null &&
+    expiresAt === null &&
+    key.length === 0 &&
+    audience.length === 0
+  ) {
+    return null
+  }
+  return { kind, key, audience, lifetime, expiresAt }
 }
 
 // ---------------------------------------------------------------------------
@@ -5858,6 +6249,14 @@ export interface CompareDispatchServices {
       projectIds?: string[]
       sourceMemoryId?: string
       confidence?: "certain" | "likely" | "speculative"
+      // Issue #283 round-3 — compare-dispatch helpers pass the
+      // pair-scope when both compared rows share scope, or
+      // `undefined` when the pair-scope rule rejects emission
+      // (in which case the helper short-circuits before this
+      // call). The structural type only requires the key to be
+      // present so a future test stub doesn't have to track the
+      // bundle exactly.
+      scope?: import("../types.js").MemoryScopeInput
     }): Promise<{ fact: { id: string }; deduped: boolean }>
   }
   decisions: {
@@ -5948,14 +6347,31 @@ export async function recordContradiction(
       | "lastReferencedAt"
       | "createdAt"
     > &
-      Partial<Pick<Memory, "compareNotes">>
-    sourceMemory: Pick<Memory, "id" | "title" | "projectIds">
+      // Issue #283 round-3 — `scope` is needed for the pair-scope
+      // emission decision. Optional so legacy callers that
+      // pre-date #283 still typecheck (their scope is undefined,
+      // which `pairScopeForFactEmission` treats as broadcast).
+      Partial<Pick<Memory, "compareNotes" | "scope">>
+    sourceMemory: Pick<Memory, "id" | "title" | "projectIds"> &
+      Partial<Pick<Memory, "scope">>
     judgeConfidence: number | undefined
   }
 ): Promise<{
-  factId: string
+  /**
+   * The id of the emitted `conflicts_with` fact. `null` when the
+   * pair-scope rule rejected emission (issue #283 round-3): the
+   * compare verdict still landed in Compare Notes on both sides
+   * (audit trail intact), but no broadcast-able fact was created
+   * because the two memories carry mismatched scopes and emitting
+   * the fact under either scope would leak the narrower row's
+   * title across the broader reader context.
+   */
+  factId: string | null
   affectedCompareNotes: string
   decremented: boolean
+  /** Populated when the fact was skipped; explains why for operator-
+   *  facing output / debug logs. Issue #283 round-3. */
+  factEmissionSkippedReason?: string
 }> {
   const ledgerEntry = buildCompareDispatchLedgerEntry({
     verdict: "conflicts_with",
@@ -5975,17 +6391,38 @@ export async function recordContradiction(
     input.sourceMemory.projectIds,
     input.contradictedMemory.projectIds
   )
-  // Step 1: emit the fact. `createWithDedup` is idempotent on the
-  // triple hash, so a retry that races against a partial-success on
-  // step 2 collapses to a no-op merge rather than a duplicate row.
-  const result = await services.facts.createWithDedup({
-    subject: input.sourceMemory.title,
-    predicate: "conflicts_with",
-    object: input.contradictedMemory.title,
-    projectIds: sharedProjects.length > 0 ? sharedProjects : undefined,
-    sourceMemoryId: input.sourceMemory.id,
-    confidence: factConfidenceFromJudge(input.judgeConfidence),
-  })
+
+  // Issue #283 round-3 — pair-scope rule. The `conflicts_with`
+  // fact references both memories' titles; emitting it under
+  // either side's scope when the two scopes differ leaks the
+  // narrower row across the broader reader context. Skip the
+  // fact emission on mismatch — the compare verdict still lands
+  // in Compare Notes on both rows below (audit trail), and the
+  // confidence decrement still fires (the contradiction is real
+  // even if the broadcast-able fact would leak).
+  const pairScope = pairScopeForFactEmission(
+    input.sourceMemory.scope,
+    input.contradictedMemory.scope
+  )
+
+  // Step 1: emit the fact when the pair-scope rule allows it.
+  // `createWithDedup` is idempotent on the triple hash + scope, so
+  // a retry that races against a partial-success on step 2
+  // collapses to a no-op merge rather than a duplicate row.
+  let factId: string | null = null
+  if (pairScope.ok) {
+    const result = await services.facts.createWithDedup({
+      subject: input.sourceMemory.title,
+      predicate: "conflicts_with",
+      object: input.contradictedMemory.title,
+      projectIds: sharedProjects.length > 0 ? sharedProjects : undefined,
+      sourceMemoryId: input.sourceMemory.id,
+      confidence: factConfidenceFromJudge(input.judgeConfidence),
+      scope: pairScope.scope,
+    })
+    factId = result.fact.id
+  }
+
   if (!alreadyDecremented) {
     // Step 2: halve the loser's Confidence Score. The Compare Notes
     // ledger line is written in the same `pages.update`; that marker is
@@ -6010,19 +6447,20 @@ export async function recordContradiction(
           "decrement. Diagnostic fields:\n" +
           `step=fact\n` +
           `affectedMemoryId=${input.contradictedMemory.id}\n` +
-          `factId=${result.fact.id}\n` +
+          `factId=${factId ?? "(pair-scope-skipped)"}\n` +
           `dispatchKey=${ledgerEntry.dispatchKey}`,
         step: "fact",
         affectedMemoryId: input.contradictedMemory.id,
-        factId: result.fact.id,
+        factId: factId ?? "(pair-scope-skipped)",
         cause: err,
       })
     }
   }
   return {
-    factId: result.fact.id,
+    factId,
     affectedCompareNotes,
     decremented: !alreadyDecremented,
+    ...(pairScope.ok ? {} : { factEmissionSkippedReason: pairScope.reason }),
   }
 }
 
@@ -6064,7 +6502,12 @@ export async function recordContradiction(
 export async function recordSupersedence(
   services: CompareDispatchServices,
   input: {
-    supersedingMemory: Pick<Memory, "id" | "title" | "projectIds" | "confidence">
+    supersedingMemory: Pick<
+      Memory,
+      "id" | "title" | "projectIds" | "confidence"
+    > &
+      // Issue #283 round-3 — scope needed for pair-scope decision.
+      Partial<Pick<Memory, "scope">>
     supersededMemory: Pick<
       Memory,
       | "id"
@@ -6075,13 +6518,25 @@ export async function recordSupersedence(
       | "lastReferencedAt"
       | "createdAt"
     > &
-      Partial<Pick<Memory, "compareNotes">>
+      Partial<Pick<Memory, "compareNotes" | "scope">>
     judgeConfidence: number | undefined
   }
 ): Promise<{
-  factId: string
+  /**
+   * The id of the emitted `supersedes_decision` fact. `null` when
+   * the pair-scope rule rejected emission (issue #283 round-3):
+   * `decisions.supersede` still landed (Status flip + relation
+   * write), the compare verdict still landed in Compare Notes,
+   * and the loser's confidence was still decremented — but the
+   * broadcast-able `supersedes_decision` fact was skipped to
+   * avoid leaking the narrower-scope decision's title across the
+   * broader reader context.
+   */
+  factId: string | null
   affectedCompareNotes: string
   decremented: boolean
+  /** See `recordContradiction`'s field. */
+  factEmissionSkippedReason?: string
 }> {
   const ledgerEntry = buildCompareDispatchLedgerEntry({
     verdict: "supersedes",
@@ -6111,46 +6566,66 @@ export async function recordSupersedence(
     input.supersededMemory.projectIds
   )
 
-  // Step 2: emit the fact. Subject = superseding memory's id (matches
-  // the existing `lore-decision action='supersede'` shape, since this
-  // helper now drives the same code path).
-  let result: { fact: { id: string }; deduped: boolean }
-  try {
-    result = await services.facts.createWithDedup({
-      subject: input.supersedingMemory.id,
-      predicate: "supersedes_decision",
-      object: input.supersededMemory.id,
-      projectIds: sharedProjects.length > 0 ? sharedProjects : undefined,
-      sourceMemoryId: input.supersedingMemory.id,
-      confidence: factConfidenceFromJudge(input.judgeConfidence),
-    })
-  } catch (err) {
-    throw new CompareDispatchPartialFailureError({
-      // Diagnostic fields interpolated INTO the message — same
-      // `toolError`-survives-message-only contract as the
-      // conflicts_with throw above. `factId` is `(none)` here
-      // because the fact create is exactly the step that failed.
-      // `supersedingMemoryId` is named because the retry/recovery
-      // action needs the subject side too.
-      message:
-        "supersedes dispatch: decisions.supersede landed (Supersedes " +
-        "relation + Status updated) but the supersedes_decision fact " +
-        "create failed (inconsistentState: true). The graph edge is " +
-        "missing; lore-query action='ask' won't surface the " +
-        "supersession on the affected entity yet. Retry the same " +
-        "lore-memory action='compare' after the transient failure is " +
-        "cleared; decisions.supersede is idempotent on relation-set " +
-        "semantics, so the retry can complete the fact and confidence " +
-        "work safely. Diagnostic fields:\n" +
-        `step=supersede\n` +
-        `affectedMemoryId=${input.supersededMemory.id}\n` +
-        `supersedingMemoryId=${input.supersedingMemory.id}\n` +
-        `factId=(none)`,
-      step: "supersede",
-      affectedMemoryId: input.supersededMemory.id,
-      factId: undefined,
-      cause: err,
-    })
+  // Issue #283 round-3 — pair-scope rule. Same logic as
+  // `recordContradiction`: skip the fact emission when the two
+  // decisions carry mismatched scopes. `decisions.supersede`
+  // already landed above (Status flip + relation write), so the
+  // graph edge inside the Memories DB is correct; the broadcast-
+  // able `supersedes_decision` fact in the Facts DB is the leak
+  // vector and gets dropped on mismatch. The compare verdict still
+  // lands in Compare Notes, and the loser's confidence still gets
+  // decremented (the supersession is real even if the fact would
+  // leak).
+  const pairScope = pairScopeForFactEmission(
+    input.supersedingMemory.scope,
+    input.supersededMemory.scope
+  )
+
+  // Step 2: emit the fact when the pair-scope rule allows it.
+  // Subject = superseding memory's id (matches the existing
+  // `lore-decision action='supersede'` shape, since this helper
+  // now drives the same code path).
+  let factId: string | null = null
+  if (pairScope.ok) {
+    try {
+      const result = await services.facts.createWithDedup({
+        subject: input.supersedingMemory.id,
+        predicate: "supersedes_decision",
+        object: input.supersededMemory.id,
+        projectIds: sharedProjects.length > 0 ? sharedProjects : undefined,
+        sourceMemoryId: input.supersedingMemory.id,
+        confidence: factConfidenceFromJudge(input.judgeConfidence),
+        scope: pairScope.scope,
+      })
+      factId = result.fact.id
+    } catch (err) {
+      throw new CompareDispatchPartialFailureError({
+        // Diagnostic fields interpolated INTO the message — same
+        // `toolError`-survives-message-only contract as the
+        // conflicts_with throw above. `factId` is `(none)` here
+        // because the fact create is exactly the step that failed.
+        // `supersedingMemoryId` is named because the retry/recovery
+        // action needs the subject side too.
+        message:
+          "supersedes dispatch: decisions.supersede landed (Supersedes " +
+          "relation + Status updated) but the supersedes_decision fact " +
+          "create failed (inconsistentState: true). The graph edge is " +
+          "missing; lore-query action='ask' won't surface the " +
+          "supersession on the affected entity yet. Retry the same " +
+          "lore-memory action='compare' after the transient failure is " +
+          "cleared; decisions.supersede is idempotent on relation-set " +
+          "semantics, so the retry can complete the fact and confidence " +
+          "work safely. Diagnostic fields:\n" +
+          `step=supersede\n` +
+          `affectedMemoryId=${input.supersededMemory.id}\n` +
+          `supersedingMemoryId=${input.supersedingMemory.id}\n` +
+          `factId=(none)`,
+        step: "supersede",
+        affectedMemoryId: input.supersededMemory.id,
+        factId: undefined,
+        cause: err,
+      })
+    }
   }
 
   if (!alreadyDecremented) {
@@ -6172,19 +6647,20 @@ export async function recordSupersedence(
           "prevent a second decrement. Diagnostic fields:\n" +
           `step=fact\n` +
           `affectedMemoryId=${input.supersededMemory.id}\n` +
-          `factId=${result.fact.id}\n` +
+          `factId=${factId ?? "(pair-scope-skipped)"}\n` +
           `dispatchKey=${ledgerEntry.dispatchKey}`,
         step: "fact",
         affectedMemoryId: input.supersededMemory.id,
-        factId: result.fact.id,
+        factId: factId ?? "(pair-scope-skipped)",
         cause: err,
       })
     }
   }
   return {
-    factId: result.fact.id,
+    factId,
     affectedCompareNotes,
     decremented: !alreadyDecremented,
+    ...(pairScope.ok ? {} : { factEmissionSkippedReason: pairScope.reason }),
   }
 }
 

@@ -214,6 +214,11 @@ function makeServices(opts: StubOpts = {}): unknown {
       decrementConfidence: vi.fn(async () => 0.45),
       queryStaleConfidence: vi.fn(async () => []),
       countProposed: vi.fn(async () => ({ total: 0, bySource: {}, byAgent: {} })),
+      expiringScopedStats: vi.fn(async () => ({
+        expired: 0,
+        expiringSoon: 0,
+        narrowScopeOutOfContext: 0,
+      })),
       recordReview:
         opts.memoriesRecordReview ??
         vi.fn(async ({ memoryId, verdict }: { memoryId: string; verdict: string }) => ({
@@ -246,6 +251,11 @@ function makeServices(opts: StubOpts = {}): unknown {
       queryByEntity: vi.fn(async () => []),
       queryBySubject: vi.fn(async () => []),
       queryOverdue: vi.fn(async () => []),
+      expiringScopedStats: vi.fn(async () => ({
+        expired: 0,
+        expiringSoon: 0,
+        narrowScopeOutOfContext: 0,
+      })),
     },
     decisions: {
       create: opts.decisionsCreate ?? vi.fn(),
@@ -1849,7 +1859,15 @@ describe("MCP tool surface", () => {
     // inbox-review actions plus their `reviewer` parameter; the +500
     // chars cover two new discriminated-union branches and one new
     // input field on `lore-memory` without leaking elsewhere.
-    const PER_TOOL_CONFIG_LIMIT = 5700
+    // Issue #283 bumped 5700 → 6000 for the `scope` parameter on
+    // save/update — one new structured field with five sub-properties
+    // (kind/key/audience/lifetime/expiresAt) plus a single combined
+    // describe() that names the closed enums for kind and lifetime so
+    // agents can pick a value without consulting docs. The +300
+    // headroom absorbs the rendered Zod object schema (per-property
+    // type strings + nullable/optional decorations) without leaking
+    // elsewhere.
+    const PER_TOOL_CONFIG_LIMIT = 6000
     const polymorphic = [
       "lore-context",
       "lore-memory",

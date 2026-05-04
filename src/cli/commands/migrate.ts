@@ -40,7 +40,14 @@ import {
 import { MEMORY_PROPS } from "../../notion/schema.js"
 
 export const migrateCommand = new Command("migrate")
-  .description("Add missing schema properties to the vault's data sources")
+  .description(
+    "Add missing schema properties to the vault's data sources. " +
+      "The schema-additive scan is idempotent — re-running after a partial " +
+      "failure (e.g. options merged but properties did not land due to a " +
+      "transient Notion error) is safe and resumes where the last run left " +
+      "off. Per-DB error attribution surfaces in the partial-failure message " +
+      "so the operator can identify which DB needs to retry."
+  )
   .option("--dry-run", "Show what would be added without writing")
   .option(
     "--upgrade-decision-tags",

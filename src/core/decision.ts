@@ -26,8 +26,10 @@ import type {
   ListDecisionsOpts,
   DatabaseRef,
 } from "../types.js"
+import type { MemoryScopeContext } from "../types.js"
 import { buildMemoryProps, MEMORY_PROPS } from "../notion/schema.js"
-import { projectOrUnscopedFilter } from "../notion/filters.js"
+import { projectOrUnscopedFilter, withDefaultScopeFilter } from "../notion/filters.js"
+import { matchesDefaultScope } from "./memory.js"
 import { decodeTextEntities } from "../notion/html-entities.js"
 import {
   collectLivePages,
@@ -66,6 +68,10 @@ type DecisionStructuralField =
   | "supersedesIds"
   | "affectsIds"
   | "tags"
+  // `scope` is a structured `MemoryScopeInput` bundle, not a free-form
+  // string — there is no encoded text to decode. Classify as
+  // structural so the coverage-drift check above stays valid.
+  | "scope"
 
 type RequiredDecisionTextField = "decision" | "rationale"
 type DecisionTextField = Exclude<keyof CreateDecisionInput, DecisionStructuralField>
@@ -147,10 +153,34 @@ export class DecisionService {
     DECISION_CACHE_TTL_MS
   )
 
+  /**
+   * Resolved scope context (issue #283). Same posture as
+   * `MemoryService.scopeCtx` and `TaskService.scopeCtx`. Default
+   * `list()` excludes narrow-scope decisions whose `Scope Key` does
+   * not match the reader; expired decisions also drop out.
+   */
+  private scopeCtx: MemoryScopeContext = {}
+  private scopeFilterEnabled = false
+
   constructor(
     private client: Client,
-    private db: DatabaseRef
-  ) {}
+    private db: DatabaseRef,
+    scopeCtx?: MemoryScopeContext
+  ) {
+    if (scopeCtx) {
+      this.scopeCtx = scopeCtx
+      this.scopeFilterEnabled = true
+    }
+  }
+
+  setScopeContext(ctx: MemoryScopeContext): void {
+    this.scopeCtx = ctx
+    this.scopeFilterEnabled = true
+  }
+
+  getScopeContext(): Readonly<MemoryScopeContext> {
+    return this.scopeCtx
+  }
 
   async create(input: CreateDecisionInput): Promise<Decision> {
     validateRichTextMetadataFields(input, "DecisionService.create")
@@ -182,6 +212,17 @@ export class DecisionService {
         keywords: decoded.keywords,
         synopsis: decoded.synopsis,
         session: decoded.session,
+        // Scope / lifetime (issue #283). Decisions default to
+        // broadcast-scoped persistent governance — most callers
+        // omit scope. The conventional explicit pairing is
+        // `scope: { lifetime: "until-decision-superseded" }` to
+        // declare that the decision should drop out of default
+        // reads when its `Status` becomes `superseded`.
+        scopeKind: input.scope?.kind,
+        scopeKey: input.scope?.key,
+        audience: input.scope?.audience,
+        lifetime: input.scope?.lifetime,
+        expiresAt: input.scope?.expiresAt,
       }),
     })
 
@@ -316,7 +357,24 @@ export class DecisionService {
       })
     }
 
-    const filter = filters.length > 1 ? { and: filters } : filters[0]
+    const baseFilter = filters.length > 1 ? { and: filters } : filters[0]
+    // Default scope filter (issue #283). Same posture as `MemoryService.list`
+    // and `TaskService.list`. The wake-up Decisions Requiring Attention
+    // section reads through this method — without scope filtering, a
+    // session-scoped decision would surface across every reader's wake-up.
+    // Server-side filter is 2-deep; the kind+key binding runs client-side
+    // via `matchesDefaultScope` threaded into `collectLivePages` as an
+    // `extraFilter`.
+    const today = todayISO()
+    const filter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, today)
+    const applyExtraFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, today)
 
     const limit = Math.min(opts?.limit ?? 20, 100)
     if (limit <= 0) {
@@ -335,6 +393,7 @@ export class DecisionService {
           page_size,
           start_cursor,
         }),
+      extraFilter: applyExtraFilter,
     })
 
     return {
@@ -465,6 +524,7 @@ export class DecisionService {
   async queryOverdue(opts?: {
     projectId?: string
     limit?: number
+    includeOutOfScope?: boolean
   }): Promise<DecisionSummary[]> {
     const { items } = await this.queryOverdueWindow(opts)
     return items
@@ -473,6 +533,16 @@ export class DecisionService {
   async queryOverdueWindow(opts?: {
     projectId?: string
     limit?: number
+    /**
+     * Issue #283 — opt out of the default-scope filter so audit /
+     * migration callers can see narrow-scope and expired rows. Both
+     * MCP `lore-query action='audit'` and the wake-up "Overdue for
+     * Review" section consume this method, so the gate keeps the
+     * default `false`: a session-scoped overdue decision must not
+     * leak to a different reader through these surfaces any more
+     * than it does through `list()`.
+     */
+    includeOutOfScope?: boolean
   }): Promise<OverdueDecisionWindow> {
     const today = todayISO()
     const filters: Array<Record<string, unknown>> = [
@@ -489,6 +559,24 @@ export class DecisionService {
       filters.push(projectOrUnscopedFilter(opts.projectId))
     }
 
+    const baseFilter = { and: filters }
+    // Default scope filter (issue #283). Same posture as `list()` above:
+    // server-side narrows to broadcast + reader's narrow kinds (Notion's
+    // 2-deep cap), client-side `matchesDefaultScope` threaded as
+    // `collectLivePages.extraFilter` enforces the kind+key binding so
+    // a session-scoped overdue decision drops out of `lore-query
+    // action='audit'` and the wake-up "Overdue for Review" surface
+    // for readers whose session id differs.
+    const filter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, today)
+    const applyExtraFilter =
+      opts?.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? undefined
+        : (page: PageObjectResponse) =>
+            matchesDefaultScope(page.properties, this.scopeCtx, today)
+
     const limit = opts?.limit ?? LIVE_PAGE_REFILL_MAX_ROWS
     if (limit <= 0) return { items: [], capped: false }
     const result = await collectLivePages({
@@ -497,11 +585,12 @@ export class DecisionService {
       query: ({ page_size, start_cursor }) =>
         this.client.dataSources.query({
           data_source_id: this.db.dataSourceId,
-          filter: { and: filters } as QueryDataSourceParameters["filter"],
+          filter: filter as QueryDataSourceParameters["filter"],
           sorts: [{ property: MEMORY_PROPS.REVIEW_BY, direction: "ascending" }],
           page_size,
           start_cursor,
         }),
+      extraFilter: applyExtraFilter,
     })
     if (result.capped) {
       warnLivePageCapFired({

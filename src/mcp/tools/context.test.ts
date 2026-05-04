@@ -378,9 +378,21 @@ function makeWakeServices(overrides: WakeServicesOverrides = {}) {
       getTitleById,
       queryStaleConfidence,
       countProposed,
+      // Issue #283 — `lore-context action='status'` calls
+      // `loadExpiringScopedStatus` which fans out to both services.
+      expiringScopedStats: vi.fn(async () => ({
+        expired: 0,
+        expiringSoon: 0,
+        narrowScopeOutOfContext: 0,
+      })),
     },
     facts: {
       listRecent: factsListRecent,
+      expiringScopedStats: vi.fn(async () => ({
+        expired: 0,
+        expiringSoon: 0,
+        narrowScopeOutOfContext: 0,
+      })),
     },
     decisions: {
       list: vi.fn(async (opts?: { status?: string }) => {

@@ -16,11 +16,22 @@ import type {
   CreateFactInput,
   FactPredicate,
   FactConfidence,
+  MemoryScopeContext,
+  MemoryScopeInput,
+  MemoryScope,
+  MemoryScopeKind,
+  MemoryLifetime,
   DatabaseRef,
 } from "../types.js"
+import { EXPIRING_SOON_DAYS, MS_PER_DAY } from "../types.js"
 import { buildFactProps, FACT_PROPS } from "../notion/schema.js"
 import { isMissingPropertyError } from "../notion/errors.js"
-import { projectOrUnscopedFilter } from "../notion/filters.js"
+import {
+  projectOrUnscopedFilter,
+  withDefaultScopeFilter,
+  FACT_SCOPE_PROPS,
+} from "../notion/filters.js"
+import { matchesDefaultScope } from "./memory.js"
 import { computeFactDedupKey, computeSubjectKey } from "../notion/normalize.js"
 import { decodeTextEntities } from "../notion/html-entities.js"
 import { withEntityRelationLocks } from "./entity-relation-lock.js"
@@ -74,6 +85,15 @@ type QueryFactsOpts = {
    * before any service call runs.
    */
   allowUnfiltered?: boolean
+  /**
+   * Issue #283. When `true`, skip the default scope filter that
+   * excludes narrow-scope facts whose `Scope Key` does not match the
+   * resolved scope context, and skip the expired-row exclusion.
+   * Defaults to `false`. Operator audit paths
+   * (`lore migrate --build-entities`, conflict scanner, status
+   * surfaces) opt in.
+   */
+  includeOutOfScope?: boolean
 }
 
 type ListRecentOpts = {
@@ -85,10 +105,41 @@ type ListRecentOpts = {
    */
   limit?: number
   includeInvalidated?: boolean
+  /**
+   * Issue #283. When `true`, skip the default scope filter that
+   * excludes narrow-scope facts whose `Scope Key` doesn't match the
+   * resolved scope context, and skip the expired-row exclusion.
+   * Defaults to `false`. Operator audit paths opt in.
+   */
+  includeOutOfScope?: boolean
 }
 
 /** Notion's hard ceiling on `page_size`. */
 const NOTION_MAX_PAGE_SIZE = 100
+
+/**
+ * Issue #283 round-4 — warning emitted once per process when the
+ * scope-constrained dedup probe finds more than one live row for
+ * the same `(dedupKey, scope bundle)`. Structurally that's a
+ * duplicate state Notion permits (no unique constraint on the
+ * combined key) and that `--dedup-keys --merge` collapses on its
+ * next pass. The probe still picks the deterministic-first row
+ * (`created_time ASC`) and proceeds; this warning surfaces the
+ * gap to operators so they know to run the migration.
+ */
+let dedupDuplicateScopeMatchWarned = false
+function logDedupDuplicateScopeMatchOnce(dedupKey: string): void {
+  if (dedupDuplicateScopeMatchWarned) return
+  dedupDuplicateScopeMatchWarned = true
+  process.stderr.write(
+    "[lore] fact-dedup: scope-constrained probe found multiple live " +
+      `rows for dedup key ${dedupKey.slice(0, 12)}... — using the ` +
+      "earliest-created match. Run `lore migrate --dedup-keys --merge` " +
+      "to collapse the duplicate state (the migration's grouping is " +
+      "scope-aware so legitimate same-triple-different-scope rows " +
+      "stay distinct).\n"
+  )
+}
 
 // Only multi-relation columns belong here. Source/SubjectEntity/ObjectEntity
 // are 0-or-1 relation columns, so they cannot be truncated by Notion's
@@ -290,10 +341,92 @@ function readFactCreatedAt(
 }
 
 export class FactService {
+  /**
+   * Resolved scope context (issue #283). Same posture as
+   * `MemoryService.scopeCtx`. Default reads filter the Facts DB by
+   * the same scope-inclusion rule as the Memories DB.
+   */
+  private scopeCtx: MemoryScopeContext = {}
+
+  /**
+   * Opt-in flag mirroring `MemoryService.scopeFilterEnabled`. Tests
+   * constructing FactService without a scope context get pre-#283
+   * retrieval shape; production callers that pass a context (even
+   * empty) get the new filter.
+   */
+  private scopeFilterEnabled = false
+
   constructor(
     private client: Client,
-    private db: DatabaseRef
-  ) {}
+    private db: DatabaseRef,
+    scopeCtx?: MemoryScopeContext
+  ) {
+    if (scopeCtx) {
+      this.scopeCtx = scopeCtx
+      this.scopeFilterEnabled = true
+    }
+  }
+
+  setScopeContext(ctx: MemoryScopeContext): void {
+    this.scopeCtx = ctx
+    this.scopeFilterEnabled = true
+  }
+
+  getScopeContext(): Readonly<MemoryScopeContext> {
+    return this.scopeCtx
+  }
+
+  /**
+   * Wrap a caller-built filter with the issue #283 default scope
+   * inclusion clauses (`Scope Kind` broadcast / narrow-key match,
+   * `Expires At` not-past). Threaded through every public read on
+   * the Facts DB so a session-scoped fact created by another reader
+   * cannot surface in this reader's `queryByEntity` /
+   * `queryBySubject` / `queryByObject` / `queryBySourceMemory`
+   * results.
+   *
+   * No-ops on two paths:
+   * - Caller passes `includeOutOfScope: true` (audit / migration paths).
+   * - The service was constructed without a scope context (test
+   *   fixtures running on the pre-#283 filter shape).
+   *
+   * Mirrors the corresponding helpers on `MemoryService`. Centralized
+   * so a future contributor adding a new public read on `FactService`
+   * threads the same gate by calling this one method rather than
+   * re-deriving the scope clause.
+   */
+  private applyDefaultScope(
+    filter: Record<string, unknown> | undefined,
+    includeOutOfScope: boolean | undefined
+  ): Record<string, unknown> | undefined {
+    if (includeOutOfScope === true || !this.scopeFilterEnabled) return filter
+    return withDefaultScopeFilter(filter, this.scopeCtx, todayUtc(), FACT_SCOPE_PROPS)
+  }
+
+  /**
+   * Companion client-side post-filter for `applyDefaultScope`
+   * (issue #283). Notion's compound-filter language caps nesting
+   * at 2 levels, so the server-side filter narrows to "scope kind
+   * is broadcast OR one of the reader's narrow kinds" without
+   * binding kind+key. The kind+key binding runs here client-side:
+   * a row whose `Scope Kind` is `session` and whose `Scope Key`
+   * does not equal the reader's `LORE_SESSION_ID` drops at this
+   * step. The over-fetch is small in practice; pagination loops
+   * in the public reads continue past dropped rows so the result
+   * still hits the caller's `limit`.
+   *
+   * Returns `undefined` when scope filtering is disabled (audit
+   * caller / no scope context) so the caller can skip the
+   * post-filter step entirely.
+   */
+  private postScopeFilterPredicate(
+    includeOutOfScope: boolean | undefined
+  ): ((page: PageObjectResponse) => boolean) | undefined {
+    if (includeOutOfScope === true || !this.scopeFilterEnabled) return undefined
+    const today = todayUtc()
+    const ctx = this.scopeCtx
+    return (page) => matchesDefaultScope(page.properties, ctx, today, FACT_SCOPE_PROPS)
+  }
 
   async create(input: CreateFactInput): Promise<Fact> {
     const { fact } = await this.createWithDedup(input)
@@ -504,6 +637,8 @@ export class FactService {
        * shape of `queryBySubject` / `queryByObject` / `queryBySourceMemory`.
        */
       limit?: number
+      /** Issue #283. See `applyDefaultScope` for semantics. */
+      includeOutOfScope?: boolean
     }
   ): Promise<Fact[]> {
     const filters: Array<Record<string, unknown>> = [
@@ -528,7 +663,13 @@ export class FactService {
     const predicateClause = predicateFilterClause(opts?.predicates)
     if (predicateClause) filters.push(predicateClause)
 
-    const filter = filters.length > 1 ? { and: filters } : filters[0]
+    const baseFilter = filters.length > 1 ? { and: filters } : filters[0]
+    // Issue #283 — narrow-scope facts whose Scope Key doesn't match
+    // the reader drop out of default `queryByEntity` recall. The
+    // server-side filter narrows to broadcast + reader's narrow
+    // kinds; the kind+key binding runs in `postScopePredicate`.
+    const filter = this.applyDefaultScope(baseFilter, opts?.includeOutOfScope)
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
     const results: PageObjectResponse[] = []
     let cursor: string | undefined = undefined
     const limit = opts?.limit
@@ -542,6 +683,7 @@ export class FactService {
         start_cursor: cursor,
       })
       for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+        if (postScopePredicate && !postScopePredicate(page)) continue
         results.push(page)
         if (limit !== undefined && results.length >= limit) break
       }
@@ -612,19 +754,39 @@ export class FactService {
     })
     const subjectKey = computeSubjectKey(relationSafeInput.subject)
 
-    const existing = await this.findLiveByDedupKey(dedupKey).catch((err) => {
-      // Probe failure (e.g. transient network blip, or a pre-migration vault
-      // that still lacks the DedupKey column) must not block the write. Log
-      // once per process and fall through to the blind-create path —
-      // worst case we create a duplicate the next migrate pass will
-      // collapse.
+    // Issue #283 round-4 — scope/lifetime participates in the merge
+    // contract via a server-side filter. The probe binds every
+    // scope component (`Scope Kind`, `Scope Key`, `Audience`,
+    // `Lifetime`, `Expires At`) plus `DedupKey` and `Valid Until is_empty`,
+    // so the result is exactly the row that should merge or empty.
+    // No client-side walk, no arbitrary cap — Notion does the
+    // bundle-equality match itself. Both directions of the round-2
+    // review's "same-triple-different-scope" test still pass
+    // because every scope column is bound on the server.
+    //
+    // The `lore migrate --dedup-keys --merge` migration uses the
+    // matching grouping (`computeFactGroupKey` joins all five
+    // columns) so create-time dedup and migration-time merge
+    // converge on the same identity rule.
+    const compatibleExisting = await this.findScopeMatchingLiveByDedupKey(
+      dedupKey,
+      relationSafeInput.scope
+    ).catch((err) => {
+      // Probe failure (e.g. transient network blip, or a pre-migration
+      // vault that still lacks the DedupKey column) must not block the
+      // write. Log once per process and fall through to the blind-
+      // create path — worst case we create a duplicate the next
+      // migrate pass will collapse.
       logProbeFailureOnce(err)
       return null
     })
-
-    if (existing) {
-      const enriched = await this.mergeOntoExisting(existing, relationSafeInput, reviewBy)
-      return { fact: existing, deduped: true, enriched }
+    if (compatibleExisting) {
+      const enriched = await this.mergeOntoExisting(
+        compatibleExisting,
+        relationSafeInput,
+        reviewBy
+      )
+      return { fact: compatibleExisting, deduped: true, enriched }
     }
 
     const page = await this.client.pages.create({
@@ -648,6 +810,7 @@ export class FactService {
         // valid rows; the migration backfills relations later.
         subjectEntityId: relationSafeInput.subjectEntityId,
         objectEntityId: relationSafeInput.objectEntityId,
+        ...factScopeInputToBuilderProps(relationSafeInput.scope),
       }),
     })
 
@@ -874,6 +1037,151 @@ export class FactService {
    * `null` branch from `pageToFact` here only fires if a future
    * deserialization-filter rule lands; today it's effectively dead.
    */
+  /**
+   * Probe for the live fact matching `(dedupKey, scope bundle)`.
+   * Returns at most one row by construction — the server-side
+   * filter binds every scope component, so two rows that pass it
+   * are duplicates the migration would collapse.
+   *
+   * Issue #283 round-4 review — the pre-fix walker paginated through
+   * up to `MAX_DEDUP_CANDIDATE_PAGES * MAX_DEDUP_CANDIDATES` (250)
+   * mismatched rows and gave up at the cap. In a high-cardinality
+   * vault where the same triple legitimately spans many sessions /
+   * runs / users, the compatible row could sit past the cap and
+   * `createWithDedup` would blind-create a duplicate. The
+   * scope-constrained query removes the cap problem entirely:
+   * Notion does the kind+key match server-side, so the result is
+   * either the compatible row (returned) or empty (caller blind-
+   * creates a fresh row under the requested scope).
+   *
+   * The filter is a flat 1-deep `and:` of property filters — well
+   * inside Notion's 2-level compound-filter limit and aligned with
+   * the round-3 follow-on shape `defaultScopeInclusionFilter`
+   * adopted elsewhere in the codebase. Scope columns that are
+   * `null` / empty on the incoming write get `is_empty` clauses on
+   * the corresponding column so a broadcast write doesn't match a
+   * narrow-scoped row (or vice versa). The scope-bundle equality
+   * the previous candidate walker enforced via
+   * `scopesMatchForMerge` is now structurally enforced by the
+   * filter itself; both directions of the round-2 review's
+   * "same-triple-different-scope" test still pass because the
+   * filter binds kind+key+audience+lifetime+expiresAt all on the
+   * server.
+   *
+   * Internal `_locked` invariant: caller holds the per-key entity
+   * relation locks and is single-shotting a probe → write sequence.
+   * Concurrent writers on the same dedup-key+scope combination
+   * are the (Notion-eventually-consistent) duplicate-create race
+   * the existing `--dedup-keys --merge` migration covers.
+   */
+  private async findScopeMatchingLiveByDedupKey(
+    dedupKey: string,
+    scope: import("../types.js").MemoryScopeInput | undefined
+  ): Promise<Fact | null> {
+    const filters: Array<Record<string, unknown>> = [
+      { property: FACT_PROPS.DEDUP_KEY, rich_text: { equals: dedupKey } },
+      { property: FACT_PROPS.VALID_UNTIL, date: { is_empty: true } },
+    ]
+
+    // Bind every scope column server-side. The clauses are
+    // structurally one-per-column so a future contributor adding
+    // a sixth scope field gets a typecheck error here when they
+    // forget to extend the filter (the input shape forces them
+    // through this list).
+    const scopeKind = scope?.kind ?? null
+    if (scopeKind === null) {
+      filters.push({
+        property: FACT_PROPS.SCOPE_KIND,
+        select: { is_empty: true },
+      })
+    } else {
+      filters.push({
+        property: FACT_PROPS.SCOPE_KIND,
+        select: { equals: scopeKind },
+      })
+    }
+
+    const scopeKey = scope?.key && scope.key.length > 0 ? scope.key : null
+    if (scopeKey === null) {
+      filters.push({
+        property: FACT_PROPS.SCOPE_KEY,
+        rich_text: { is_empty: true },
+      })
+    } else {
+      filters.push({
+        property: FACT_PROPS.SCOPE_KEY,
+        rich_text: { equals: scopeKey },
+      })
+    }
+
+    const audience =
+      scope?.audience && scope.audience.length > 0 ? scope.audience : null
+    if (audience === null) {
+      filters.push({
+        property: FACT_PROPS.AUDIENCE,
+        rich_text: { is_empty: true },
+      })
+    } else {
+      filters.push({
+        property: FACT_PROPS.AUDIENCE,
+        rich_text: { equals: audience },
+      })
+    }
+
+    const lifetime = scope?.lifetime ?? null
+    if (lifetime === null) {
+      filters.push({
+        property: FACT_PROPS.LIFETIME,
+        select: { is_empty: true },
+      })
+    } else {
+      filters.push({
+        property: FACT_PROPS.LIFETIME,
+        select: { equals: lifetime },
+      })
+    }
+
+    const expiresAt = scope?.expiresAt ?? null
+    if (expiresAt === null) {
+      filters.push({
+        property: FACT_PROPS.EXPIRES_AT,
+        date: { is_empty: true },
+      })
+    } else {
+      filters.push({
+        property: FACT_PROPS.EXPIRES_AT,
+        date: { equals: expiresAt },
+      })
+    }
+
+    // Single-page query — `page_size: 2` (not 1) so a future
+    // duplicate-row state surfaces as "more than one match"
+    // instead of silently picking position 0. We log a stderr
+    // warning when that happens; the caller still merges into the
+    // first match (deterministic by the explicit `created_time
+    // ASC` sort below) and `lore migrate --dedup-keys --merge`
+    // collapses the duplicates on the next pass.
+    const response = await this.client.dataSources.query({
+      data_source_id: this.db.dataSourceId,
+      filter: { and: filters } as QueryDataSourceParameters["filter"],
+      sorts: [{ timestamp: "created_time", direction: "ascending" }],
+      page_size: 2,
+    })
+
+    const pages = response.results.filter(isFullPage) as PageObjectResponse[]
+    if (pages.length === 0) return null
+    if (pages.length > 1) {
+      logDedupDuplicateScopeMatchOnce(dedupKey)
+    }
+    return await this.pageToFact(pages[0])
+  }
+
+  /**
+   * Legacy single-row dedup probe retained for non-create call
+   * sites that need "any live row with this key" without scope
+   * compatibility. Currently unused — kept for the primitive shape
+   * the scope-constrained probe builds on.
+   */
   private async findLiveByDedupKey(dedupKey: string): Promise<Fact | null> {
     const response = await this.client.dataSources.query({
       data_source_id: this.db.dataSourceId,
@@ -883,9 +1191,9 @@ export class FactService {
           { property: FACT_PROPS.VALID_UNTIL, date: { is_empty: true } },
         ],
       } as QueryDataSourceParameters["filter"],
+      sorts: [{ timestamp: "created_time", direction: "ascending" }],
       page_size: 1,
     })
-
     const pages = response.results.filter(isFullPage) as PageObjectResponse[]
     if (pages.length === 0) return null
     return await this.pageToFact(pages[0])
@@ -975,12 +1283,18 @@ export class FactService {
       }
     }
 
-    const filter =
+    const baseFilter =
       filters.length > 1
         ? { and: filters }
         : filters.length === 1
           ? filters[0]
           : undefined
+
+    // Issue #283 — apply the default scope filter before pagination so
+    // narrow-scope facts whose Scope Key doesn't match the reader drop
+    // out of `lore-query action='ask'` Subject substring recall.
+    const filter = this.applyDefaultScope(baseFilter, opts?.includeOutOfScope)
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
 
     const results: PageObjectResponse[] = []
     let cursor: string | undefined = undefined
@@ -995,6 +1309,7 @@ export class FactService {
         start_cursor: cursor,
       })
       for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+        if (postScopePredicate && !postScopePredicate(page)) continue
         results.push(page)
         if (limit !== undefined && results.length >= limit) break
       }
@@ -1052,12 +1367,18 @@ export class FactService {
       }
     }
 
-    const filter =
+    const baseFilter =
       filters.length > 1
         ? { and: filters }
         : filters.length === 1
           ? filters[0]
           : undefined
+
+    // Issue #283 — apply default scope filter on Object substring recall
+    // so narrow-scope facts referenced in another reader's session
+    // don't surface here.
+    const filter = this.applyDefaultScope(baseFilter, opts?.includeOutOfScope)
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
 
     const results: PageObjectResponse[] = []
     let cursor: string | undefined = undefined
@@ -1072,6 +1393,7 @@ export class FactService {
         start_cursor: cursor,
       })
       for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+        if (postScopePredicate && !postScopePredicate(page)) continue
         results.push(page)
         if (limit !== undefined && results.length >= limit) break
       }
@@ -1120,7 +1442,17 @@ export class FactService {
       }
     }
 
-    const filter = filters.length > 1 ? { and: filters } : filters[0]
+    const baseFilter = filters.length > 1 ? { and: filters } : filters[0]
+
+    // Issue #283 — narrow-scope facts whose Scope Key doesn't match
+    // the reader drop out of `queryBySourceMemory` recall by default.
+    // The auto-mentions diff path in `MemoryService.update` opts out
+    // (`includeOutOfScope: true`) because the diff must see every
+    // fact the row sourced regardless of scope, otherwise the
+    // re-emission would leave orphan facts whose source memory was
+    // re-titled.
+    const filter = this.applyDefaultScope(baseFilter, opts?.includeOutOfScope)
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
 
     const results: PageObjectResponse[] = []
     let cursor: string | undefined = undefined
@@ -1135,6 +1467,7 @@ export class FactService {
         start_cursor: cursor,
       })
       for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+        if (postScopePredicate && !postScopePredicate(page)) continue
         results.push(page)
         if (limit !== undefined && results.length >= limit) break
       }
@@ -1172,12 +1505,23 @@ export class FactService {
       })
     }
 
-    const filter =
+    const baseFilter =
       filters.length > 1
         ? { and: filters }
         : filters.length === 1
           ? filters[0]
           : undefined
+
+    // Default scope filter (issue #283). The wake-up Active Facts
+    // section reads through this method — without scope filtering,
+    // a session-scoped fact would surface in every other session's
+    // wake-up, which is the load-bearing acceptance-criterion failure
+    // mode. `includeOutOfScope: true` opts out for audit paths; the
+    // filter also no-ops when `scopeFilterEnabled` is false.
+    const filter =
+      opts.includeOutOfScope === true || !this.scopeFilterEnabled
+        ? baseFilter
+        : withDefaultScopeFilter(baseFilter, this.scopeCtx, todayUtc(), FACT_SCOPE_PROPS)
 
     const pageSize = clampNotionPageSize(opts.limit)
 
@@ -1188,7 +1532,16 @@ export class FactService {
       page_size: pageSize,
     })
 
-    const pages = response.results.filter(isFullPage) as PageObjectResponse[]
+    let pages = response.results.filter(isFullPage) as PageObjectResponse[]
+    // Issue #283 — kind+key binding via client-side post-filter.
+    // `listRecent` is single-page by design (the wake-up hot
+    // path), so dropped narrow-key-mismatch rows just shrink the
+    // result; we do NOT paginate to backfill, mirroring the
+    // pre-#283 single-page contract.
+    const postScopePredicate = this.postScopeFilterPredicate(opts.includeOutOfScope)
+    if (postScopePredicate) {
+      pages = pages.filter(postScopePredicate)
+    }
     return {
       items: await this.pageToFacts(pages),
       hasMore: response.has_more ?? false,
@@ -1239,6 +1592,12 @@ export class FactService {
        * slice.
        */
       limit?: number
+      /**
+       * Issue #283. Forwarded into both underlying branches so the
+       * scope filter applies symmetrically across the relation and
+       * substring legs. Audit / migration paths set `true`.
+       */
+      includeOutOfScope?: boolean
     }
   ): Promise<Fact[]> {
     // Empty / whitespace entity would otherwise reach `queryBySubject`
@@ -1272,11 +1631,13 @@ export class FactService {
           projectId: opts.projectId,
           predicates: opts.predicates,
           limit,
+          includeOutOfScope: opts.includeOutOfScope,
         }),
         this.queryByEntityTextOnUnmigrated(entity, {
           projectId: opts.projectId,
           predicates: opts.predicates,
           limit,
+          includeOutOfScope: opts.includeOutOfScope,
         }),
       ])
       const seen = new Set(byRelation.map((f) => f.id))
@@ -1304,7 +1665,13 @@ export class FactService {
    */
   private async queryByEntityTextOnUnmigrated(
     entity: string,
-    opts?: { projectId?: string; predicates?: FactPredicate[]; limit?: number }
+    opts?: {
+      projectId?: string
+      predicates?: FactPredicate[]
+      limit?: number
+      /** Issue #283 — forwarded from `queryByEntity`. */
+      includeOutOfScope?: boolean
+    }
   ): Promise<Fact[]> {
     // Whitespace-only entity must short-circuit too. `Subject contains
     // ""` and `Object contains ""` are vault-wide matches in Notion,
@@ -1345,6 +1712,16 @@ export class FactService {
     )
     baseFilters.push({ or: textOr })
 
+    // Issue #283 — apply default scope filter on the unmigrated-text
+    // branch. Symmetric with the relation branch via `queryByEntityId`,
+    // so a session-scoped fact does not surface in this reader's
+    // `queryByEntity` result regardless of which branch finds it.
+    const scopedFilter = this.applyDefaultScope(
+      { and: baseFilters },
+      opts?.includeOutOfScope
+    )
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
+
     try {
       const results: PageObjectResponse[] = []
       let cursor: string | undefined = undefined
@@ -1353,12 +1730,13 @@ export class FactService {
       do {
         const response = await this.client.dataSources.query({
           data_source_id: this.db.dataSourceId,
-          filter: { and: baseFilters } as QueryDataSourceParameters["filter"],
+          filter: scopedFilter as QueryDataSourceParameters["filter"],
           sorts: [{ timestamp: "created_time", direction: "descending" }],
           page_size: pageSize,
           start_cursor: cursor,
         })
         for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+          if (postScopePredicate && !postScopePredicate(page)) continue
           results.push(page)
           if (limit !== undefined && results.length >= limit) break
         }
@@ -1419,7 +1797,20 @@ export class FactService {
     return await this.pageToFacts(results)
   }
 
-  async queryOverdue(opts?: { projectId?: string; limit?: number }): Promise<Fact[]> {
+  async queryOverdue(opts?: {
+    projectId?: string
+    limit?: number
+    /**
+     * Issue #283 — opt out of the default-scope filter so audit /
+     * migration callers can see narrow-scope and expired rows. The
+     * MCP `lore-query action='audit'` surface keeps this `false`
+     * (default): a session-scoped overdue fact must not surface to
+     * a different reader through audit any more than it does
+     * through `queryBySubject` / `queryByObject`. Mirrors the
+     * other public reads on this service.
+     */
+    includeOutOfScope?: boolean
+  }): Promise<Fact[]> {
     const today = new Date().toISOString().split("T")[0]
     const filters: Array<Record<string, unknown>> = [
       { property: FACT_PROPS.REVIEW_BY, date: { on_or_before: today } },
@@ -1429,6 +1820,19 @@ export class FactService {
     if (opts?.projectId) {
       filters.push(projectOrUnscopedFilter(opts.projectId, FACT_PROPS.PROJECT))
     }
+
+    const baseFilter = { and: filters }
+    // Issue #283 — narrow-scope and expired-row filtering. Server-side
+    // clauses come from `applyDefaultScope`; the kind+key binding runs
+    // client-side via `postScopeFilterPredicate` because Notion's
+    // compound-filter language caps nesting at 2 levels (see
+    // `defaultScopeInclusionFilter`'s docstring for the empirical
+    // confirmation). The audit surface (`lore-query action='audit'`,
+    // wake-up's "Overdue for Review") consumes this method, so the
+    // gate is required to keep session-scoped overdue rows from
+    // bleeding to other readers.
+    const filter = this.applyDefaultScope(baseFilter, opts?.includeOutOfScope)
+    const postScopePredicate = this.postScopeFilterPredicate(opts?.includeOutOfScope)
 
     // Paginate to exhaustion (or to `limit`) — Notion's default page is 100
     // rows, so a single-shot query silently truncates a vault that has more
@@ -1440,12 +1844,13 @@ export class FactService {
     do {
       const response = await this.client.dataSources.query({
         data_source_id: this.db.dataSourceId,
-        filter: { and: filters } as QueryDataSourceParameters["filter"],
+        filter: filter as QueryDataSourceParameters["filter"],
         sorts: [{ property: FACT_PROPS.REVIEW_BY, direction: "ascending" }],
         page_size: Math.min(limit ?? NOTION_MAX_PAGE_SIZE, NOTION_MAX_PAGE_SIZE),
         start_cursor: cursor,
       })
       for (const page of response.results.filter(isFullPage) as PageObjectResponse[]) {
+        if (postScopePredicate && !postScopePredicate(page)) continue
         const fact = await this.pageToFact(page)
         if (fact === null) continue
         items.push(fact)
@@ -1812,6 +2217,64 @@ export class FactService {
    * the migration doesn't try to seed scores onto historical rows whose
    * domain shape we no longer recognize.
    */
+  /**
+   * Operator-facing counters for the `lore status` expiring/expired
+   * scoped-facts surface (issue #283). Mirrors
+   * `MemoryService.expiringScopedStats` exactly — single paginated
+   * walk over live (non-invalidated) facts, classifying each by
+   * `Expires At` and by narrow-scope context match.
+   *
+   * Counts only live facts (`Valid Until is_empty`) — invalidated
+   * facts are already historical and don't need an expiry surface.
+   */
+  async expiringScopedStats(opts: { projectId?: string } = {}): Promise<{
+    expired: number
+    expiringSoon: number
+    narrowScopeOutOfContext: number
+  }> {
+    const today = todayUtc()
+    const horizonMs =
+      Date.parse(today) + EXPIRING_SOON_DAYS * MS_PER_DAY
+    const horizon = new Date(horizonMs).toISOString().slice(0, 10)
+    let expired = 0
+    let expiringSoon = 0
+    let narrowScopeOutOfContext = 0
+    const ctx = this.scopeCtx
+    for await (const fact of this.listAllForBackfill(opts)) {
+      const scope = fact.scope ?? null
+      if (scope === null) continue
+      const expiresAt = scope.expiresAt
+      if (expiresAt !== null) {
+        if (expiresAt < today) {
+          expired += 1
+        } else if (expiresAt <= horizon) {
+          expiringSoon += 1
+        }
+      }
+      const kind = scope.kind
+      if (kind === null) continue
+      if (kind === "team" || kind === "project" || kind === "global") continue
+      const expected =
+        kind === "user"
+          ? ctx.userId
+          : kind === "agent"
+            ? ctx.agent
+            : kind === "role"
+              ? ctx.role
+              : kind === "session"
+                ? ctx.session
+                : kind === "run"
+                  ? ctx.run
+                  : kind === "environment"
+                    ? ctx.environment
+                    : undefined
+      if (expected === undefined || scope.key !== expected) {
+        narrowScopeOutOfContext += 1
+      }
+    }
+    return { expired, expiringSoon, narrowScopeOutOfContext }
+  }
+
   async *listAllForBackfill(
     opts: {
       projectId?: string
@@ -2044,8 +2507,42 @@ export class FactService {
       createdAt: page.created_time,
       subjectEntityId: subjectEntityIds[0] ?? null,
       objectEntityId: objectEntityIds[0] ?? null,
+      scope: extractFactScope(props),
     }
   }
+}
+
+/**
+ * Read the five scope columns on a Facts DB row into a `MemoryScope`
+ * bundle. Mirrors `extractMemoryScope` in `core/memory.ts` — same
+ * "all-empty → null" rule so pre-#283 rows deserialize as null.
+ */
+function extractFactScope(
+  props: PageObjectResponse["properties"]
+): MemoryScope | null {
+  const kindProp = props[FACT_PROPS.SCOPE_KIND]
+  const kind =
+    kindProp && kindProp.type === "select" && kindProp.select
+      ? (kindProp.select.name as MemoryScopeKind)
+      : null
+  const key = extractRichText(props[FACT_PROPS.SCOPE_KEY])
+  const audience = extractRichText(props[FACT_PROPS.AUDIENCE])
+  const lifetimeProp = props[FACT_PROPS.LIFETIME]
+  const lifetime =
+    lifetimeProp && lifetimeProp.type === "select" && lifetimeProp.select
+      ? (lifetimeProp.select.name as MemoryLifetime)
+      : null
+  const expiresAt = extractDate(props[FACT_PROPS.EXPIRES_AT])
+  if (
+    kind === null &&
+    lifetime === null &&
+    expiresAt === null &&
+    key.length === 0 &&
+    audience.length === 0
+  ) {
+    return null
+  }
+  return { kind, key, audience, lifetime, expiresAt }
 }
 
 /**
@@ -2062,3 +2559,105 @@ const HISTORICAL_TRACKING_PREDICATE_VALUES: ReadonlySet<string> = new Set([
   "waiting_on",
   "blocked_by",
 ])
+
+/**
+ * Decide whether `createWithDedup`'s probe hit on an existing row
+ * should merge into that row, or fall through to a blind create
+ * (issue #283).
+ *
+ * Returns `true` only when the existing row's scope deep-equals the
+ * incoming write's scope. The match is exact:
+ *
+ * - Both null (or absent): match — pre-#283 rows or untouched-scope
+ *   writes coalesce as before.
+ * - One null, one populated: NO match — adding scope to a previously-
+ *   broadcast row, or vice versa, must not silently merge. The
+ *   narrow-scope write needs its own row; the broadcast write also
+ *   needs its own row so default team reads can see it.
+ * - Both populated: must match on every component (`kind`, `key`,
+ *   `audience`, `lifetime`, `expiresAt`).
+ *
+ * The `key`, `audience` rich_text comparison normalizes empty string
+ * and whitespace-only on both sides to "not declared" so an explicit
+ * `key: ""` clear from one side doesn't structurally split from a
+ * legacy null on the other side. Select / date columns compare with
+ * strict equality.
+ *
+ * The function is intentionally narrow: a future contributor adding
+ * a sixth scope column to the type bundle gets a typecheck error
+ * here when they forget to compare it, because the incoming side is
+ * destructured and the destructure-rest pattern is `{ ...rest } =
+ * input` — any leftover key blocks the same-shape assertion. (The
+ * destructure-rest pattern is itself the test fixture's
+ * regression detector; see scope-builder.test.ts.)
+ */
+export function scopesMatchForMerge(
+  existing: import("../types.js").MemoryScope | null,
+  incoming: import("../types.js").MemoryScopeInput | undefined
+): boolean {
+  // Treat all-undefined incoming and null existing as the same case:
+  // a write with no scope bundle merging into a row with no scope.
+  const incomingDeclared =
+    incoming !== undefined &&
+    (incoming.kind !== undefined ||
+      incoming.lifetime !== undefined ||
+      incoming.expiresAt !== undefined ||
+      isMeaningful(incoming.key) ||
+      isMeaningful(incoming.audience))
+  if (existing === null && !incomingDeclared) return true
+  if (existing === null || !incomingDeclared) return false
+
+  // Both sides declare scope — every column must align. The Memory-
+  // Scope-Input type allows partial writes (e.g. just `lifetime:
+  // "expires"` + `expiresAt: ...` without a `kind`); for merge
+  // purposes, `undefined` on the incoming side AND a non-null value
+  // on the existing side is a mismatch — caller didn't declare the
+  // same identity slot.
+  const existingKey = existing.key.trim().length > 0 ? existing.key : null
+  const incomingKey =
+    incoming.key !== undefined && incoming.key.trim().length > 0 ? incoming.key : null
+  const existingAudience =
+    existing.audience.trim().length > 0 ? existing.audience : null
+  const incomingAudience =
+    incoming.audience !== undefined && incoming.audience.trim().length > 0
+      ? incoming.audience
+      : null
+
+  return (
+    existing.kind === (incoming.kind ?? null) &&
+    existingKey === incomingKey &&
+    existingAudience === incomingAudience &&
+    existing.lifetime === (incoming.lifetime ?? null) &&
+    existing.expiresAt === (incoming.expiresAt ?? null)
+  )
+}
+
+function isMeaningful(value: string | undefined): boolean {
+  return value !== undefined && value.trim().length > 0
+}
+
+/**
+ * Translate the agent-facing `MemoryScopeInput` shape into the flat
+ * primitive arguments `buildFactProps` consumes (issue #283). Mirrors
+ * `scopeInputToBuilderProps` in `core/memory.ts` — see that helper's
+ * docstring for the rationale on keeping the bundle-to-primitive
+ * translation outside the builder.
+ */
+function factScopeInputToBuilderProps(
+  scope: MemoryScopeInput | undefined
+): {
+  scopeKind?: string | null
+  scopeKey?: string
+  audience?: string
+  lifetime?: string | null
+  expiresAt?: string | null
+} {
+  if (scope === undefined) return {}
+  const out: ReturnType<typeof factScopeInputToBuilderProps> = {}
+  if (scope.kind !== undefined) out.scopeKind = scope.kind
+  if (scope.key !== undefined) out.scopeKey = scope.key
+  if (scope.audience !== undefined) out.audience = scope.audience
+  if (scope.lifetime !== undefined) out.lifetime = scope.lifetime
+  if (scope.expiresAt !== undefined) out.expiresAt = scope.expiresAt
+  return out
+}

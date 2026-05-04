@@ -9546,3 +9546,157 @@ describe("lore-memory action='update' — empty string still clears (issue #467)
     expect(result.isError).toBeFalsy()
   })
 })
+
+// ===========================================================================
+// Issue #283 round-4 — integration tests pinning scope inheritance on
+// system-managed facts emitted by `lore-memory action='save'` / 'update'.
+// The contract is implemented via `memoryScopeToInput` in `src/types.ts`;
+// these tests pin the call-site behavior at the MCP handler boundary so a
+// future contributor that forgets to pass `scope:` to a new fact emitter
+// (or the existing ones) breaks CI rather than silently regressing the
+// scope-inheritance contract.
+// ===========================================================================
+
+describe("lore-memory auto-mentions scope inheritance (issue #283 round-4)", () => {
+  it("Test A — scoped save: auto-emitted mentions facts inherit the memory's scope", async () => {
+    const mockServer = createMockServer()
+    const created = makeMemory("mem-scoped", {
+      title: "Investigated PR #25750 latency regression",
+      projectIds: ["proj-a"],
+      keywords: "performance",
+      // Round-4: the saved memory carries a session scope. Auto-
+      // emitted mentions facts MUST inherit it.
+      scope: {
+        kind: "session",
+        key: "sess-A",
+        audience: "",
+        lifetime: null,
+        expiresAt: null,
+      },
+    })
+    const createWithDedup = vi.fn().mockResolvedValue({
+      fact: { id: "fact-1" },
+      deduped: false,
+      enriched: [],
+    })
+
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { getOrCreate: vi.fn() },
+      memories: {
+        create: vi.fn().mockResolvedValue(created),
+        list: vi.fn().mockResolvedValue({ items: [] }),
+      },
+      tasks: { list: vi.fn().mockResolvedValue({ items: [] }) },
+      facts: { createWithDedup },
+      context: { project: { id: "proj-a", name: "a" }, isCatchAllFallback: false },
+      config: { projects: [] },
+      sessionMemories: { record: vi.fn(), get: vi.fn() },
+      identity: { resolveAuthor: vi.fn(async () => null), clearCache: vi.fn() },
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    const remember = mockServer.getActionHandler("lore-memory", "save")
+
+    await remember({
+      title: "Investigated PR #25750 latency regression",
+      content: "body",
+      keywords: "performance",
+      scope: { kind: "session", key: "sess-A" },
+    } as never)
+
+    // Every emitted mentions fact carries the session scope. The
+    // call-args matcher binds `scope.kind === "session"` and
+    // `scope.key === "sess-A"` on at least one call.
+    expect(createWithDedup).toHaveBeenCalled()
+    const callArgs = createWithDedup.mock.calls.map((c) => c[0])
+    for (const arg of callArgs) {
+      expect(arg.scope).toEqual({ kind: "session", key: "sess-A" })
+    }
+  })
+
+  it("Test B — scope-changed update: existing mentions facts invalidated + re-emitted under new scope", async () => {
+    const mockServer = createMockServer()
+    // Existing memory has session=sess-OLD scope; existing mentions
+    // facts carry the same scope.
+    const updated = makeMemory("mem-rescope", {
+      title: "Investigated PR #25750 latency regression",
+      projectIds: ["proj-a"],
+      scope: {
+        kind: "session",
+        key: "sess-NEW",
+        audience: "",
+        lifetime: null,
+        expiresAt: null,
+      },
+    })
+    const existingMentionsFact = {
+      id: "fact-old-scope",
+      subject: "Investigated PR #25750 latency regression",
+      predicate: "mentions" as const,
+      object: "PR #25750",
+      projectIds: ["proj-a"],
+      validFrom: null,
+      validUntil: null,
+      reviewBy: null,
+      sourceMemoryId: "mem-rescope",
+      confidence: "speculative" as const,
+      confidenceScore: null,
+      lastReferencedAt: null,
+      createdAt: "2026-04-20T00:00:00.000Z",
+      subjectEntityId: null,
+      objectEntityId: null,
+      scope: {
+        kind: "session" as const,
+        key: "sess-OLD",
+        audience: "",
+        lifetime: null,
+        expiresAt: null,
+      },
+    }
+    const createWithDedup = vi.fn().mockResolvedValue({
+      fact: { id: "fact-new-scope" },
+      deduped: false,
+      enriched: [],
+    })
+    const invalidate = vi.fn(async () => undefined)
+    const queryBySourceMemory = vi.fn(async () => [existingMentionsFact])
+
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { getOrCreate: vi.fn() },
+      memories: {
+        update: vi.fn().mockResolvedValue(updated),
+        getById: vi.fn().mockResolvedValue(updated),
+      },
+      tasks: { list: vi.fn().mockResolvedValue({ items: [] }) },
+      facts: { createWithDedup, invalidate, queryBySourceMemory },
+      context: { project: { id: "proj-a", name: "a" }, isCatchAllFallback: false },
+      config: { projects: [] },
+      sessionMemories: { record: vi.fn(), get: vi.fn() },
+      identity: { resolveAuthor: vi.fn(async () => null), clearCache: vi.fn() },
+      wakeupCache: { bumpEpoch: vi.fn() },
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    const handler = mockServer.getActionHandler("lore-memory", "update")
+
+    await handler({
+      memoryId: "mem-rescope",
+      // Trigger the auto-mentions diff branch by including a
+      // title (extraction-relevant arg).
+      title: "Investigated PR #25750 latency regression",
+      scope: { kind: "session", key: "sess-NEW" },
+    } as never)
+
+    // The existing fact under sess-OLD is invalidated.
+    expect(invalidate).toHaveBeenCalledWith("fact-old-scope")
+    // A new fact gets emitted under sess-NEW.
+    expect(createWithDedup).toHaveBeenCalled()
+    const reEmit = createWithDedup.mock.calls.find(
+      (c) => c[0].object === "PR #25750"
+    )
+    expect(reEmit).toBeDefined()
+    expect(reEmit?.[0]?.scope).toEqual({ kind: "session", key: "sess-NEW" })
+  })
+})

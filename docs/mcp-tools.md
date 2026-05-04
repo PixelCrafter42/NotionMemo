@@ -68,6 +68,47 @@ facts, memory bodies, or the raw `userQuery`.
 | `approve`           | Promote a `Status: proposed` memory to `accepted` and append a `## Reviewed (date)` audit block (issue #281). Inbox-only — non-proposed rows reject. Optional `reviewer` defaults to the engineer-identity resolver; optional `reason` recorded in audit body. |
 | `reject`            | Flip a `Status: proposed` memory to `rejected` and append the same audit block. Same inbox-only state guard as `approve`. Rejected rows are excluded from default `lore-query action='recall'` / `'search'`; surface them via explicit `status: "rejected"`.  |
 
+### Scope and lifetime (`scope` parameter, issue #283)
+
+`save` and `update` accept an optional `scope` bundle that declares
+who the row applies to and how it expires. Default reads exclude
+narrow-scope rows whose `Scope Key` does not match the resolved
+scope context, so a session note from one engineer's debugging run
+does not leak into another session's recall.
+
+```json
+{
+  "scope": {
+    "kind": "team | project | user | agent | role | session | run | environment | global",
+    "key": "<stable identifier within the kind>",
+    "audience": "<free-form text>",
+    "lifetime": "persistent | expires | session-only | until-task-closed | until-decision-superseded",
+    "expiresAt": "YYYY-MM-DD"
+  }
+}
+```
+
+- **Broadcast scopes** (`team`, `project`, `global`) surface for every
+  reader by default.
+- **Narrow scopes** (`user`, `agent`, `role`, `session`, `run`,
+  `environment`) require the reader's matching context value
+  (resolved from `LORE_USER_NAME` / `LORE_AGENT_NAME` / `LORE_ROLE`
+  / `LORE_SESSION_ID` / `LORE_RUN_ID` / `LORE_ENVIRONMENT`) to equal
+  `scope.key`. A missing identity slot drops every row carrying that
+  scope kind; there is no fallback wildcard.
+- **Expiry**: `expires` lifetime requires `expiresAt`; rows with
+  `expiresAt < today` drop out of default reads (`lore status`
+  surfaces them under "Expired scoped rows" for cleanup).
+  `until-task-closed` and `until-decision-superseded` are
+  declarative — retrieval already drops closed tasks and superseded
+  decisions via the existing state filters.
+
+On `update`, every field is optional with clear-aware semantics:
+omit to leave the column untouched, pass `null` on the select / date
+columns to clear, or pass an empty string on the rich_text columns
+to clear. Pre-#283 rows have all five columns null and pass through
+default reads byte-identically.
+
 ## `lore-query` — vault read paths
 
 | Action   | Description                                                                                                                                                                                                                                                      |
@@ -81,7 +122,7 @@ facts, memory bodies, or the raw `userQuery`.
 
 | Action       | Description                                                                                                                                                                       |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create`     | Add a subject-predicate-object fact triple. Requires a live, project-compatible Memories row via `sourceMemoryId` or `agent`+`session` that auto-links a compatible source memory before writing. Tracking predicates (`needs_action` / `waiting_on` / `blocked_by`) are rejected post-P3-02 — use `lore-task action='create'` instead. |
+| `create`     | Add a subject-predicate-object fact triple. Requires a live, project-compatible Memories row via `sourceMemoryId` or `agent`+`session` that auto-links a compatible source memory before writing. Tracking predicates (`needs_action` / `waiting_on` / `blocked_by`) are rejected post-P3-02 — use `lore-task action='create'` instead. Accepts the same `scope` bundle as `lore-memory` (issue #283); scope participates in dedup so a session-scoped fact does NOT merge into an existing team-scoped row of the same triple. |
 | `invalidate` | Invalidate a fact (sets Valid Until date, preserves history)                                                                                                                      |
 | `extend`     | Set, advance, or clear a fact's review-by date                                                                                                                                    |
 
@@ -118,10 +159,10 @@ so structural queries actually work.
 
 | Action      | Description                                                            |
 | ----------- | ---------------------------------------------------------------------- |
-| `create`    | Create a task with subject, description, state, blocker, and due date  |
-| `update`    | Update a task's state, blocker, due date, subject, or description      |
+| `create`    | Create a task with subject, description, state, blocker, and due date. Accepts the issue #283 `scope` bundle; the conventional pairing is `scope: { kind: "session", key: "<session-id>", lifetime: "until-task-closed" }` for per-session tracked work. |
+| `update`    | Update a task's state, blocker, due date, subject, or description. Same `scope` bundle as `create`; absent fields leave columns untouched. |
 | `close`     | Mark a task done (or cancelled — distinguished for metrics)            |
-| `list`      | List tasks with Overdue/Active sections; filters by entity, state, due |
+| `list`      | List tasks with Overdue/Active sections; filters by entity, state, due. Default reads apply the issue #283 scope filter so narrow-scope tasks from another reader's session/agent/role drop out. The `includeOutOfScope` opt-out is service-internal only; the `lore status` expiring-rows counters call it directly, but it is not exposed on the MCP tool. |
 | `reconcile` | Surface likely active tasks that can be closed from newer evidence     |
 
 The old single-purpose task aliases were removed in 0.6.0; use the polymorphic
@@ -136,8 +177,8 @@ into tasks.
 
 | Action      | Description                                                                                   |
 | ----------- | --------------------------------------------------------------------------------------------- |
-| `create`    | Record a decision with rationale, alternatives, consequences; auto-creates `decided_by` facts |
-| `list`      | Index-tier listing of decisions (no body fetch)                                               |
+| `create`    | Record a decision with rationale, alternatives, consequences; auto-creates `decided_by` facts. Accepts the issue #283 `scope` bundle; the conventional pairing for governance decisions is `scope: { lifetime: "until-decision-superseded" }`. |
+| `list`      | Index-tier listing of decisions (no body fetch). Default reads apply the issue #283 scope filter. The `includeOutOfScope` opt-out is service-internal only and not exposed on the MCP tool surface. |
 | `get`       | Load full rationale + metadata for a specific decision                                        |
 | `context`   | Find every decision governing an entity via the facts graph                                   |
 | `supersede` | Mark an old decision as superseded by a new one; creates a `supersedes_decision` fact         |

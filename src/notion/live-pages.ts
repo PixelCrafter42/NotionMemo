@@ -33,6 +33,24 @@ export async function collectLivePages(input: {
   source: string
   query: QueryPage
   maxPages?: number
+  /**
+   * Issue #283 — optional client-side post-filter applied to each
+   * live page during pagination. Returning `false` drops the page
+   * from the result without consuming a slot toward `limit`, so the
+   * walker keeps paginating to backfill. Mirrors how the existing
+   * `isLiveFullPage` filter handles archived rows.
+   *
+   * The Notion server-side filter for narrow scope is restricted to
+   * 2 levels of nesting (Notion's compound-filter limit), so the
+   * server narrows to "scope kind matches a broadcast OR one of the
+   * reader's narrow kinds" but cannot bind kind+key together.
+   * `extraFilter` enforces the kind+key binding client-side: a row
+   * with `Scope Kind = "session"` whose `Scope Key` does not match
+   * the reader's `LORE_SESSION_ID` drops here, the walker
+   * over-fetches by one slot, and the result still hits the
+   * caller's requested limit.
+   */
+  extraFilter?: (page: PageObjectResponse) => boolean
 }): Promise<LivePageWindow> {
   if (input.limit <= 0) {
     return {
@@ -59,8 +77,11 @@ export async function collectLivePages(input: {
     pageCount++
 
     const livePages = response.results.filter(isLiveFullPage)
-    const visiblePages =
+    let visiblePages =
       skipIds.size > 0 ? livePages.filter((page) => !skipIds.has(page.id)) : livePages
+    if (input.extraFilter) {
+      visiblePages = visiblePages.filter(input.extraFilter)
+    }
     const remaining = input.limit - pages.length
     const selected = visiblePages.slice(0, remaining)
     pages.push(...selected)

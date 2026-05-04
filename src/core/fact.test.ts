@@ -1012,7 +1012,7 @@ describe("FactService.createWithDedup", () => {
     errSpy.mockRestore()
   })
 
-  it("queries with an equals filter on DedupKey and is_empty on Valid Until", async () => {
+  it("queries with a scope-constrained filter on DedupKey + Valid Until + every scope column", async () => {
     client.dataSources.query.mockResolvedValueOnce({
       results: [],
       has_more: false,
@@ -1028,7 +1028,14 @@ describe("FactService.createWithDedup", () => {
 
     const queryCall = client.dataSources.query.mock.calls[0][0]
     expect(queryCall.data_source_id).toBe("facts-ds")
-    expect(queryCall.page_size).toBe(1)
+    // Issue #283 round-4 — dedup probe is now scope-constrained:
+    // every scope column is bound on the server (so the result is
+    // either the compatible row or empty by construction). The
+    // probe asks for `page_size: 2` so duplicate state surfaces as
+    // "more than one match" rather than silently picking position 0.
+    expect(queryCall.page_size).toBe(2)
+    // No incoming scope on this test → filter binds every scope
+    // column to is_empty.
     expect(queryCall.filter).toEqual({
       and: [
         {
@@ -1042,6 +1049,11 @@ describe("FactService.createWithDedup", () => {
           },
         },
         { property: "Valid Until", date: { is_empty: true } },
+        { property: "Scope Kind", select: { is_empty: true } },
+        { property: "Scope Key", rich_text: { is_empty: true } },
+        { property: "Audience", rich_text: { is_empty: true } },
+        { property: "Lifetime", select: { is_empty: true } },
+        { property: "Expires At", date: { is_empty: true } },
       ],
     })
   })
@@ -1552,6 +1564,9 @@ describe("FactService.createWithDedup — HTML entity decode at write", () => {
     expect(objectProp.rich_text[0].text.content).toBe("R & D")
 
     const queryCall = client.dataSources.query.mock.calls[0][0]
+    // Issue #283 round-4 — scope-constrained probe binds every scope
+    // column on the server. With no incoming scope, every column
+    // gets `is_empty`.
     expect(queryCall.filter).toEqual({
       and: [
         {
@@ -1565,6 +1580,11 @@ describe("FactService.createWithDedup — HTML entity decode at write", () => {
           },
         },
         { property: "Valid Until", date: { is_empty: true } },
+        { property: "Scope Kind", select: { is_empty: true } },
+        { property: "Scope Key", rich_text: { is_empty: true } },
+        { property: "Audience", rich_text: { is_empty: true } },
+        { property: "Lifetime", select: { is_empty: true } },
+        { property: "Expires At", date: { is_empty: true } },
       ],
     })
   })
