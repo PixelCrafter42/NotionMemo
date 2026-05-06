@@ -1,0 +1,650 @@
+# `src/notion/runtool/` — Phase 0 Reconnaissance
+
+> **Status: Reconnaissance only.** This directory documents the RunTool
+> public-API surface that Lore plans to use for two read-path cleanup wins
+> (memory search and aggregate queries). No client code or production wiring
+> lives here yet — those land in Phase 1+ per
+> [issue #532](https://github.com/makenotion/lore/issues/532). Until that
+> happens, every assertion in this file is sourced from the pinned upstream
+> commit named below; runtime behavior on Lore's actual auth path is
+> annotated as "needs runtime verification" wherever the code path could not
+> be fully resolved by reading source.
+
+## Why This Module Is Quarantined
+
+Quan Nguyen on the Notion Public API team named two practical paths around
+the gaps Lore filed in the public-API feedback package delivered to the
+Notion API team on 2026-05-05:
+
+1. Use the Notion MCP server directly. Works for agents but is not
+   programmatic.
+2. Call the underlying `RunTool` API. Schema lives in
+   `makenotion/notion-next:src/server-publicApi/apis/ai_tools/params/RunToolParams.ts`.
+
+Both halves matter:
+
+> Except for file upload, the MCP is miles ahead of the api. — Quan
+
+> RunTool is built as a public api, it is not publicly documented. We will
+> make breaking changes in the future. — Quan
+
+The first half justifies the experiment; the second constrains rollout. The
+schema is therefore **vendored as a pinned subset** — never imported from
+`notion-next` at build or runtime, never extended past the two read-path
+wins below without an explicit issue, and gated behind opt-in feature flags.
+
+## Pinned Schema Source
+
+| Item | Value |
+| ---- | ----- |
+| Repo | `makenotion/notion-next` |
+| Branch (snapshot reviewed) | `main` |
+| Commit | `69cd144ac1e429229680b6fb24ec29bcea3e37ac` |
+| Snapshot date | 2026-05-05 |
+
+Per-file blob SHAs at the pinned commit:
+
+| Path (under `src/server-publicApi/apis/ai_tools/`) | Blob SHA |
+| -------------------------------------------------- | -------- |
+| `params/RunToolParams.ts` | `b9370e41a29f2b784f8f7564c3ba08766d83f938` |
+| `params/search/SearchToolParams.ts` | `d1f0b451a28fe2eaf3b86beed6b5c987438761f5` |
+| `params/query_data_sources/QueryDataSourcesToolParams.ts` | `2bcab21355c6604e1d150543191f2584290cfcad` |
+| `params/query_data_sources/QueryDataSourcesDataParams.ts` | `8faf522d1b7af92420a021818051c68395470da4` |
+| `resources/RunToolResource.ts` | `b743e99863c2ecd254ab3a81b59e90621ba36095` |
+| `resources/search/SearchResource.ts` | `d5a1db1a98082a17fd0f6d923fef1057579156d3` |
+| `resources/search/InternalSearchResource.ts` | `0e85b9c8ad728c476b98adfc887f8aa9c2a6b733` |
+| `resources/search/InternalSearchResultResource.ts` | `e82780637d6b54dd3477c3b7d4d39f508f90e753` |
+| `resources/search/UserSearchResource.ts` | `9a1328974d25c08535b40a3ac1560653e96c8787` |
+| `resources/query_data_sources/QueryDataSourcesResource.ts` | `5c7410744748326c660019e568ca89a73e973954` |
+| `endpoints/RunTool.ts` | `9a48d3aa9c5b093cb6dad050f83297b16c9312c1` |
+
+Every file the README cites for the documented contract is pinned. A
+future schema-pin refresh updates this whole table at once so a
+reviewer can diff blob-by-blob against the new commit.
+
+### Refreshing the pin
+
+When the upstream schema is refreshed, the pin update **must** happen as a
+dedicated PR that:
+
+1. Updates this table with the new commit + blob SHAs.
+2. Re-runs the A/B harness (`compat.test.ts`, Phase 4) and pastes the diff
+   summary in the PR body.
+3. Calls out any breaking change in the request envelope, response shape,
+   or capability gating.
+
+## Endpoint And Method
+
+`POST /v1/tools/run`
+
+Source:
+[`endpoints/RunTool.ts:142`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)
+— `export const Path = "/v1/tools/run" as const`. The endpoint is registered
+with `isEndpointDocumented: false`; this is the load-bearing reason Lore
+treats it as opt-in and pinned-schema. The endpoint is gated behind the
+`ai_tools_public_api` Statsig feature flag at the server side.
+
+Base URL is the same Notion REST host Lore already targets — `LORE_NOTION_BASE_URL`
+when set, otherwise the SDK's default Notion API host. The wrapper must
+NOT introduce a second base-URL knob; the existing
+`createClient(token, baseUrl)` resolution chain in `src/notion/client.ts`
+applies. Lore does not pin the SDK's default host literal in this README
+so a hardcoded mismatch between RunTool wrapper and SDK cannot drift in.
+
+## Request Envelope
+
+The body is a discriminated union keyed by `type`:
+
+```jsonc
+{
+  "type": "<tool_name>",
+  "<tool_name>": { /* tool-specific params */ }
+}
+```
+
+Use the **RunTool API tool names** in Lore code and docs:
+
+| Tool name (RunTool API) | MCP-facing alias (do NOT use in Lore) |
+| ----------------------- | ------------------------------------- |
+| `search`                | `notion-search`                       |
+| `query_data_sources`    | `notion-query-data-sources`           |
+| `create_pages`          | `notion-create-pages`                 |
+| `update_page`           | `notion-update-page`                  |
+
+`RunToolParams.ALL_TOOLS` is the authoritative list. The MCP-facing names
+are a separate aliasing layer; the wrapper must speak the API names so
+schema drift in either layer surfaces as a type error.
+
+The wrapper surface in Phase 1 is intentionally narrow:
+
+```ts
+runTool("search", params)
+runTool("query_data_sources", params)
+```
+
+### Response envelope (asymmetric with request)
+
+The response body is **the bare per-tool resource shape** — there is NO
+outer `{ type, [tool_name]: {...} }` wrapping mirroring the request.
+`RunToolResource.Value` resolves through
+`ToolImplementationsConfig[ToolName]["successResult"]` and the runtime
+type is a `unionResource` over the per-tool resources directly.
+Concretely:
+
+- `search` returns a `SearchResource.Value` — itself a discriminated
+  union of `InternalSearchResource.Value | UserSearchResource.Value`,
+  discriminated by the inner `type` field (see "`search` Tool" below).
+- `query_data_sources` returns a `QueryDataSourcesResource.Value`
+  directly (`{ results, has_more, data_source_ids? }`).
+
+A Phase 1 wrapper that types its response as `{ type, [tool]: ... }`
+(mirroring the request) will trip on the first call. Type the response
+as the per-tool resource directly.
+
+`RunToolParams.ALL_TOOLS` defines **20 tools** at the pinned commit:
+`search`, `fetch`, `create_pages`, `update_page`, `move_pages`,
+`duplicate_page`, `create_database`, `update_data_source`,
+`create_comment`, `get_comments`, `get_teams`, `get_users`,
+`answer_question`, `query_data_sources`, `query_database_view`,
+`query_meeting_notes`, `list_agents`, `chat`, `create_view`,
+`update_view`. (`answer_question`, `list_agents`, and `chat` are
+`limited_configurations` tools — visible only in `local` /
+`development` configurations and not on the public path Lore uses;
+the README's table at the top of this section therefore lists only
+the four issue-#532 names.) Every tool except `search` and
+`query_data_sources` is **out of scope for issue #532**; a future
+issue must explicitly add any others.
+
+## Auth And Capability Requirements For ntn-Resolved Tokens
+
+> **Lore-side scope warning.** RunTool requires a user-actor or
+> workflow-bot token. Two of Lore's four supported auth paths
+> (`LORE_NOTION_TOKEN` and the soft-deprecated `auth.token` in
+> `.lore.yaml`) are integration secrets — public OAuth integrations
+> from a Lore-team perspective — and will be rejected with 403 on
+> every RunTool call. `NOTION_API_TOKEN` is ambiguous: it can be
+> either an integration secret or an ntn-resolved token, depending
+> on what the operator exported. Only the ntn-resolved path
+> (`~/.config/notion/auth.json`, post-0.10.0 default) is guaranteed
+> to satisfy RunTool's actor-type check. Phase 1's wrapper must
+> detect the 403-from-integration-secret case explicitly — silently
+> degrading every legacy-auth caller to "RunTool unavailable" is
+> the correct behavior, but it must be loud enough that an operator
+> on `LORE_NOTION_TOKEN` knows why their flagged-on calls never use
+> the new path. The dogfood rollout messaging needs to call this
+> out: flipping `LORE_USE_RUNTOOL=1` while still using
+> `LORE_NOTION_TOKEN` is a no-op at best and an error-spam at
+> worst.
+
+### Confirmed from source
+
+`RunTool.executeWithoutRequestMetadata` has **two parallel actor-type
+paths**, not one:
+
+1. **Workflow-bot fast path** — for every supported tool, an early
+   `if (bodyParams.type === "<tool>" && bot.isWorkflowBot())` branch
+   ([`endpoints/RunTool.ts:274-358`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts))
+   dispatches directly to the per-tool helper (`search`,
+   `queryDataSources`, etc.) using the bot itself as the actor.
+   Workflow bots **never reach** `resolveRunToolUserActor`.
+
+2. **Non-workflow path** — falls through to
+   `resolveRunToolUserActor`
+   ([`endpoints/RunTool.ts:96-129`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts))
+   which:
+   - **Personal bots** (`bot.getType() === "personal"`): returns
+     `RequestLocalContext.metadata.effectiveActor` provided
+     `botParentPointer` matches the effective actor's id; otherwise
+     `ApiValidationError("User not found")`.
+   - **User guest bots with `UserTable` parent**: loads the user via
+     `environment.records.loadRecord(botParentPointer)` and returns
+     them as the actor.
+   - **Anything else** (public OAuth integration, workflow bot whose
+     parent is not a User, anything not matching the above):
+     `ApiRestrictedResourceError("Only public integrations can access this API.")`.
+
+> **Naming hazard:** the error message "Only public integrations can
+> access this API" fires when the actor is NOT a user-guest bot with a
+> `UserTable` parent — i.e. the message text is the **inverse** of the
+> rule. RunTool actually rejects public OAuth integrations and accepts
+> only personal bots, workflow bots, and user-guest bots with a User
+> parent. Phase 1's wrapper should translate this surfacing into a
+> Lore-actionable message such as: "RunTool rejected this token; it
+> looks like a public OAuth integration. RunTool requires a personal,
+> workflow, or user-guest token from `ntn`."
+
+### Dispatch order in `executeImpl`
+
+Three gates run in sequence; understanding the order matters when
+classifying a 403:
+
+1. `isMcpClientAllowed` — workspace MCP-client allowlist
+   ([`endpoints/RunTool.ts:399-425`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)).
+2. `publicApiRunToolRateLimit` — per-actor, per-tool rate-limit
+   ([`endpoints/RunTool.ts:201-209`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)).
+   Runs **before** the workflow-bot capability check, so a workflow bot
+   calling a disallowed tool still consumes rate-limit budget on the
+   eventual rejection.
+3. Workflow-bot capability allowlist (`getAllowedDirectMcpToolNames`)
+   ([`endpoints/RunTool.ts:251-272`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)),
+   then per-tool dispatch.
+
+### Workflow-bot capability gating
+
+For workflow bots, `getAllowedDirectMcpToolNames` and
+`getDirectToolAccessFlags` produce an allowlist
+([`endpoints/RunTool.ts:251-272`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)):
+
+- `search` — `ALWAYS_SHOW`.
+- `query_data_sources` — gated on `hasAdvancedTools` (Enterprise + AI
+  workspace plan). `query_database_view` is the consolation tool for
+  `hasAiAccess && !hasAdvancedTools` (Business+ with AI but no advanced
+  tools).
+- `query_meeting_notes` — gated on `hasAiAccess`.
+- All write tools (`create_pages`, `update_page`, etc.) — `ALWAYS_SHOW` at
+  the visibility layer; per-tool quotas apply downstream.
+
+Source: `RunToolParams.ALL_TOOLS` capability predicates
+([`params/RunToolParams.ts:258-298`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/params/RunToolParams.ts)).
+
+A workflow bot calling a tool not in its allowed direct list returns:
+
+```
+ApiRestrictedResourceError(
+  "This token does not have the required capabilities to use the <tool> tool."
+)
+```
+
+### MCP client allowlist
+
+`isMcpClientAllowed` runs against the workspace MCP-client allowlist
+([`endpoints/RunTool.ts:399-425`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)).
+A workspace admin may have explicitly disallowed unknown MCP clients; in
+that case every RunTool call from Lore returns:
+
+```
+ApiRestrictedResourceError(
+  "This MCP client is not allowed in this workspace. A workspace admin can
+  manage allowed MCP clients in the workspace settings."
+)
+```
+
+Lore's existing client already sends a stable `User-Agent` (set from
+the `USER_AGENT` constant in `src/notion/client.ts`); RunTool calls
+inherit it through the same SDK path. Reference the constant when
+writing wrapper docs or tests rather than the literal version, which
+silently drifts on every release. Whether and how to surface this
+error to operators is a Phase 1+ UX decision.
+
+### Header
+
+The Notion SDK v5 sends the resolved token as `Authorization: Bearer
+<token>` for every request, RunTool included. There is no separate header
+or capability namespace at the wire level. The auth resolution chain
+(`NOTION_API_TOKEN` > ntn-resolved `~/.config/notion/auth.json` >
+`LORE_NOTION_TOKEN` > `auth.token`) is unchanged.
+
+### Open questions — runtime verification needed before Phase 2/3
+
+These cannot be answered from source alone:
+
+1. **Which actor type does an ntn-issued token resolve as on the
+   server?** RunTool routes differently depending on whether the bot
+   is `workflow`, `personal`, or `userGuestBot`-with-`UserTable`-parent
+   (see "Auth And Capability Requirements" above). ntn tokens come
+   from the workspace's Connections setting after the engineer
+   authorizes ntn against their personal account, so the bot parent
+   is almost certainly `UserTable` — but the *type* determines
+   whether Lore's calls take the workflow-bot fast path (gated on
+   `getAllowedDirectMcpToolNames`, capability-checked) or fall
+   through to `resolveRunToolUserActor` (gated on user-guest-bot
+   shape, capability-unchecked at this layer). Phase 1's first
+   integration test should be: call `query_data_sources` with a
+   trivial `SELECT 1 FROM "collection://..." LIMIT 0` and record the
+   actor type and outcome (success / 403-with-message) in this
+   README before Phase 3 wiring begins.
+
+2. **Does the ntn-issued token's workspace have `hasAdvancedTools`?**
+   This is a billing-plan question, not a code question. The Notion
+   internal vault is on Enterprise + AI; the team's dogfood vault may
+   not be. If Lore's target workspaces don't all have advanced tools,
+   Phase 3 (aggregates) becomes degraded for some operators and we
+   either fall back to the JS `GROUP BY` path or surface a guard error.
+
+3. **Does the workspace block unknown MCP clients?** The
+   `isMcpClientAllowed` check runs unconditionally. Notion's internal
+   workspace policy may already allowlist `lore/...` user agents; the
+   public-template Mail vault may not. Phase 1 should record both
+   outcomes.
+
+## Rate-Limit Accounting
+
+### Confirmed from source
+
+RunTool calls go through **two rate-limit checks**:
+
+1. **Per-tool, per-actor RunTool quota.** `publicApiRunToolRateLimit({
+   environment, actorId, toolName })` runs at the top of
+   `executeWithoutRequestMetadata`
+   ([`endpoints/RunTool.ts:201-209`](https://github.com/makenotion/notion-next/blob/69cd144ac1e429229680b6fb24ec29bcea3e37ac/src/server-publicApi/apis/ai_tools/endpoints/RunTool.ts)).
+   Failures surface as the standard public-API rate-limit response
+   (HTTP 429 with `Retry-After`). The bucket is keyed on `(actorId,
+   toolName)` — `search` and `query_data_sources` quotas are
+   independent of each other and of the standard REST per-token bucket.
+
+2. **Block-write quota** (write tools only). `publicApiRunToolBlockRateLimitPreCheck`
+   plus `incrementPublicApiRunToolBlockCount` count blocks written by
+   `create_pages` / `update_page` / `move_pages` / `duplicate_page` /
+   `create_comment`. Read tools (`search`, `query_data_sources`) skip
+   this gate. The synchronous-block check is itself gated by the
+   `public_api_block_creation_rate_limit_enabled` Statsig flag.
+
+### How this composes with the existing REST/SDK bucket
+
+The existing `src/notion/rate-limit.ts` token bucket targets Notion's
+**~3 rps per-token guidance for the standard REST API**
+(`DEFAULT_NOTION_REQUESTS_PER_SECOND = 3`,
+`DEFAULT_NOTION_BURST_SIZE = 3`). RunTool's bucket is separate — but
+**both buckets count requests that traverse the same `Authorization`
+header**. The cleanest approach is to keep RunTool calls under the same
+token bucket as REST calls so:
+
+- A single Lore process never exceeds the lower of the two ceilings.
+- Cross-tool fan-out (a memory search that issues a RunTool `search`
+  followed by a REST `pages.retrieve` chain to hydrate relations) paces
+  uniformly.
+- The 429 backoff path already wired into `createLimitedClient` — including
+  the `Retry-After` clamp at `MAX_RATE_LIMIT_BACKOFF_MS = 60_000ms` —
+  applies regardless of which bucket surfaced the 429.
+
+**Contract for Phase 1:** the RunTool client wrapper must share the
+same client-side outbound rps gate as the SDK calls — i.e. the
+`createLimitedClient` token bucket. A second parallel gate
+(a fresh `pLimit(3)` inside `runtool/client.ts`, or a separate token
+bucket) would silently double the effective rps and is forbidden by
+issue #532's "composition" non-goal: "RunTool calls must compose with
+the same configured request pacing/backoff used by the Notion client
+wrapper." How that sharing is achieved (proxy reuse, bucket injection,
+or shared limit handle) is a Phase 1 architecture decision; this
+README pins only the contract, not the mechanism.
+
+**Test invariant.** `src/notion/AGENTS.md`'s rate-limiting section
+already requires a `rate-limit.test.ts` case for every new SDK call
+site, because the recursive Proxy can silently bypass a
+function-shape change with no type-level signal. Phase 1 must add a
+RunTool case to that suite — both a concurrency-cap assertion and a
+pacing assertion — alongside the existing top-level / two-level /
+three-level coverage. Without that case, a future SDK refactor can
+silently drop RunTool out of the wrap.
+
+**Multi-process pacing.** `src/notion/AGENTS.md` already documents
+that Notion enforces rate limits per access token, so a Lore process
+running concurrently with the MCP server, with a hook spawn, or
+across worktrees each pace independently at 3 rps locally — the
+RunTool server bucket sees the union, bounded by
+`DEFAULT_NOTION_CONCURRENCY × number of concurrent processes`. The
+RunTool per-tool, per-actor server bucket adds a second
+ceiling on top of this, but does not change the multi-process
+arithmetic on Lore's side. Phase 1's wrapper does not need a new
+mechanism for this; it inherits `createLimitedClient`'s posture.
+
+### Error model
+
+Confirmed shapes (from `@notionhq/server/helpers/publicApiError`):
+
+- `ApiValidationError` — 400 family. Body shape matches Notion's standard
+  `{ object: "error", code: "validation_error", message: "..." }`.
+- `ApiRestrictedResourceError` — 403. Used for unsupported actor types,
+  workflow-bot capability denials, and workspace MCP-client allowlist
+  rejection.
+- Rate-limit failure — 429 with `Retry-After`. The body code Lore should
+  expect is the same `rate_limited` family the v5 SDK already parses;
+  the wrapper should NOT add a second 429 detection path.
+- 5xx — opaque server error; Lore must per-call fall back to the
+  REST/SDK path (per issue #532's fallback contract).
+
+### Open questions — runtime verification needed
+
+1. Is the per-tool RunTool quota looser, tighter, or equal to the 3 rps
+   REST guidance? Phase 1 should measure with a trivial 25-call burst
+   against a dev vault and record the answer here.
+2. Does the surfaced `Retry-After` for a RunTool 429 differ in units or
+   shape from the REST-bucket 429? The existing 429 path in
+   `src/notion/rate-limit.ts` (`extractRetryAfterMs`, module-private
+   today) handles both seconds and absolute-date `Retry-After` values;
+   if Phase 1's RunTool wrapper composes through `createLimitedClient`
+   (the contract above), it inherits that handling without writing a
+   second parser. Confirm RunTool's `Retry-After` shape matches REST's
+   so this composition is sound.
+
+## `search` Tool — Input/Output Shape
+
+### Input (`SearchToolParams.Value`)
+
+| Field | Type | Required | Notes |
+| ----- | ---- | -------- | ----- |
+| `query` | `string` (min length 1) | yes | Semantic query string. |
+| `query_type` | `"internal" \| "user"` | no | "internal" = workspace+connectors; "user" = user-by-name/email lookup. **Workflow-bot variant omits this field — workflow bots can only do `internal`.** |
+| `content_search_mode` | `"workspace_search" \| "ai_search"` | no | Force backend. Default = AI if available, else workspace. **Workflow-bot variant omits this — workflow bots are pinned to `workspace_search`.** |
+| `data_source_url` | `string` | no | `collection://<data_source_id>` URL to scope search to one Lore database. THIS IS THE ONLY KNOB Lore needs for `searchHybrid` scoping. |
+| `page_url` | `string` | no | Restrict to a page subtree. Not used by Lore. |
+| `teamspace_id` | `string` | no | Restrict to a teamspace. Not used by Lore. |
+| `filters` | `SearchFilterParam.Value` | no | Date range / creator-id filters. **This is the hook for `applySemanticPostFilters` — Lore's project / kind / status post-filters do NOT map cleanly here, but creator-id filters do.** |
+| `page_size` | int 1-25, default 10 | no | Hard server cap of 25 — much smaller than `client.search`'s 100. Drives Phase 2 pagination math. |
+| `max_highlight_length` | int 0-500, default 200 | no | 0 = omit highlights. Lore can use 0 to minimize response size. |
+
+### Lore-relevant pagination behavior
+
+`SearchToolParams` exposes no `start_cursor` field (no pagination cursor
+in the request) and `InternalSearchResource` exposes no `next_cursor`
+(no pagination cursor in the response). The only knob is `page_size`,
+capped server-side at 25. **This is a hard divergence from REST
+`client.search`, which paginates with `start_cursor`/`next_cursor` and
+supports `page_size: 100`.** Phase 2 must runtime-verify the
+no-cursor reading against a real call; the structural consequences
+(impact on `SEMANTIC_SEARCH_MAX_PAGES` and the saturating-contains
+loop) are Phase 2 design decisions, not Phase 0 contract.
+
+### Output (`SearchResource.Value` — discriminated union)
+
+`SearchResource.Value = InternalSearchResource.Value | UserSearchResource.Value`,
+discriminated by the outer `type` field returned in the response. Lore's
+memory-search use case exclusively issues `query_type: "internal"`
+requests, which by contract return `InternalSearchResource.Value`; the
+`UserSearchResource` arm is unused. The Phase 1 wrapper has two valid
+postures:
+
+- **Compile-time narrow.** Type the wrapper's `search` overload so a
+  `query_type: "internal"` request returns `InternalSearchResource.Value`
+  and a `query_type: "user"` request returns `UserSearchResource.Value`,
+  using TypeScript's discriminated-union type narrowing.
+- **Runtime narrow.** Accept any `SearchResource.Value`, assert
+  `result.type` is one of `"ai_search" | "workspace_search" | "none"`
+  (the `InternalSearchResource` arm) at the wrapper boundary, and
+  surface a programming-error if the `UserSearchResource` arm
+  (discriminator `"user_search"`) is ever returned.
+
+Either is acceptable; both must avoid silently casting `UserSearchResource`
+results into a memory-search consumer expecting `InternalSearchResource`.
+
+The `InternalSearchResource` arm — the only one Lore consumes:
+
+```ts
+type InternalSearchResource = {
+  type: "ai_search" | "workspace_search" | "none"
+  results: Array<{
+    id: string
+    title: string
+    url: string         // page ID for Notion results, full URL for connector results
+    type: string        // discriminator (page, database, etc.)
+    highlight: string   // empty when max_highlight_length=0
+    timestamp: string
+    is_archived?: boolean
+  }>
+}
+```
+
+Two Lore-specific contract observations:
+
+1. **`url` is a page-ID for Notion results.** Lore can pass that ID
+   directly to `pages.retrieveMarkdown` / hydrate-relations — no URL
+   parsing needed. External connector results (Slack, Linear, Drive)
+   have a full URL and are not Lore page candidates.
+2. **No score field.** Each result carries `id`, `title`, `url`,
+   `type`, `highlight`, `timestamp`, optional `is_archived` — that's
+   the entire shape. REST `client.search` doesn't return scores
+   either, so this is not a regression, but it's worth noting that
+   any cross-branch fusion built on rank order (e.g. RRF) sees
+   ordering and possibly score-scale differences from REST. Quantifying
+   that divergence is the A/B harness's job in Phase 4.
+
+## `query_data_sources` Tool — Input/Output Shape
+
+### Input (`QueryDataSourcesToolParams.Value`)
+
+The body wraps `data` in an outer envelope:
+
+```jsonc
+{
+  "type": "query_data_sources",
+  "query_data_sources": {
+    "data": { /* SQL mode OR view mode — discriminated by `mode` */ }
+  }
+}
+```
+
+#### SQL mode (default)
+
+| Field | Type | Required |
+| ----- | ---- | -------- |
+| `data_source_urls` | `string[]` | yes — `collection://<data_source_id>` for each table referenced in `query` |
+| `query` | `string` | yes — SQLite. Use the data-source URL **as the table name**, fully quoted: `SELECT * FROM "collection://abc..." WHERE ...` |
+| `mode` | `"sql"` | no — defaults to `"sql"` |
+| `params` | `string[]` | no — parameterized values for `?` placeholders. Use `"__YES__"` / `"__NO__"` for checkbox boolean. |
+
+#### View mode
+
+| Field | Type | Required |
+| ----- | ---- | -------- |
+| `mode` | `"view"` | yes |
+| `view_url` | `string` | yes — full URL with `?v=<view_id>` |
+
+Lore's aggregate use case (orphan-rate computation in
+`entity-migration.ts`) is **SQL mode only**. View mode is documented for
+completeness but is not part of the issue-#532 scope.
+
+### Output (`QueryDataSourcesResource.Value`)
+
+Source: `resources/query_data_sources/QueryDataSourcesResource.ts` at
+blob SHA `5c7410744748326c660019e568ca89a73e973954`.
+
+```ts
+type QueryDataSourcesResource = {
+  // Required:
+  results: Array<Record<string, string | number | boolean | string[] | null>>
+  has_more: boolean
+  // Optional:
+  data_source_ids?: string[]    // "only present for SQL queries" (per resource description)
+}
+```
+
+Each row is a flat record keyed by the SQL output column name. Cell
+values come from `SQLiteDatabasePropertyValue` and are typed as
+`string | number | boolean | string[] | null` via `unionResource` plus
+`nullableResource`.
+
+Two Lore-specific contract observations:
+
+1. **Aggregates collapse to scalar columns.** A `SELECT
+   SubjectEntity, COUNT(*) AS cnt FROM "collection://..." GROUP BY
+   SubjectEntity` returns rows of `{SubjectEntity: string|null, cnt:
+   number}` — the shape `entity-migration.ts`'s orphan-rate metric
+   needs. Phase 3 evaluates whether moving the JS `GROUP BY` into
+   SQL is worth the runtime cost.
+2. **No body content.** The result is property data only — no rich
+   text body, no children blocks. Any downstream caller that needs
+   the page body must follow up with `pages.retrieveMarkdown`. This
+   is fine for the orphan-rate use case (which only needs property
+   relations and counts) but constrains the primitive's reusability
+   to read-only aggregate workloads.
+
+### Pagination
+
+`QueryDataSourcesDataParams` exposes **no cursor, no offset, and no
+explicit `page_size`** input field. The response carries
+`has_more: boolean` but the request envelope offers no documented way
+to request the next page. Three takeaways for Phase 1+:
+
+1. **Phase 1 must runtime-probe the actual server cap.** Call a
+   trivial unfiltered `SELECT * FROM "collection://..." LIMIT 99999`
+   against a vault large enough to exceed the server cap, observe the
+   `has_more` response, and record the inferred cap value in this
+   README before Phase 3 wiring begins.
+2. **Phase 3 must define behavior on `has_more === true`.** Lore's
+   orphan-rate use case is bounded by `SubjectEntity` cardinality
+   (small in practice on the Mail vault — pre-PF3-01 baseline ~445
+   distinct subjects) so a single call almost certainly suffices.
+   The wrapper still has to either (a) error explicitly on
+   `has_more === true` so callers cannot silently consume a partial
+   result, OR (b) fall back per-call to REST `dataSources.query` +
+   JS `GROUP BY` for the full set. Phase 3 picks one.
+3. **Cap-induced fallback is distinct from 403/429 fallback.** The
+   fallback counter Phase 3 maintains should distinguish "fell back
+   because of capability gate" (403) from "fell back because of
+   rate-limit pressure" (429) from "fell back because the result
+   set exceeded the server cap" (200 with `has_more: true`). The
+   first is structural (per-workspace plan tier); the second is
+   operational; the third is data-shape — different operator
+   actions follow.
+
+### Capability gate is the bigger risk
+
+`query_data_sources` requires `hasAdvancedTools` (Enterprise + AI),
+gated server-side. Phase 3 wiring must therefore plan for a 403
+response shape on workspaces below that plan tier: the fallback
+contract from issue #532 ("If a RunTool call fails while the flag is
+on, fall back per call to the existing REST/SDK path and
+increment/log a fallback counter") covers this case. The specific
+fallback policy — when, how loudly, and whether to mute repeat 403s
+within a process — is a Phase 3 design decision, not a Phase 0
+contract.
+
+## Phase 0 Acceptance Re-Check
+
+| Phase 0 deliverable (issue #532) | Status |
+| -------------------------------- | ------ |
+| Endpoint and method | Confirmed: `POST /v1/tools/run` |
+| Request envelope shape and exact tool names | Confirmed; tool names use API form (`search`, `query_data_sources`) |
+| Auth header / capability requirements for ntn-resolved tokens | Confirmed actor-type rejection for public integrations; three-outcome enumeration (workflow-bot fast path / personal-bot via `effectiveActor` / user-guest-bot via `loadRecord`) flagged for Phase 1 runtime probe |
+| Rate-limit accounting | Confirmed two-bucket model; composition contract for Lore's wrapper documented; per-tool quota magnitude flagged for Phase 1 runtime measurement |
+| `search` input/output shape, pagination, result IDs, score/highlight | Confirmed; cursor-pagination divergence from REST documented |
+| `query_data_sources` SQL input/output, aggregate result representation, capability gating | Confirmed; `hasAdvancedTools` gate documented |
+| Source commit/blob SHA for the pinned schema | Confirmed table above |
+
+A reviewer without `notion-next` repo access can read this file alone and
+understand the RunTool contract well enough to design the Phase 1 client
+and audit the Phase 2/3 wrappers.
+
+## What Lands Next (Out Of Scope For Phase 0)
+
+Phase 1+ deliverables — see issue #532 for full criteria:
+
+- `client.ts` — `runTool("search" | "query_data_sources", params)` with
+  shared rate-limit composition, 401-refresh hook, fallback counter, and
+  no second base-URL knob.
+- `types.ts` — pinned subset of `RunToolParams` (search + query) re-typed
+  to match Lore's existing import boundary; no `notion-next` runtime or
+  build dependency.
+- `search.ts` / `query.ts` — request/response mappers between RunTool
+  shapes and Lore's domain types.
+- `runtool.test.ts` — mocked HTTP success / 401 / 403 / 429 / 5xx /
+  malformed / unsupported-tool-name cases.
+- `compat.test.ts` — A/B harness asserting page-id-set equivalence
+  between REST and RunTool paths at equal `limit`, AND aggregate-row
+  equivalence between JS `GROUP BY` and SQL `GROUP BY`.
+- `LORE_USE_RUNTOOL` / `LORE_USE_RUNTOOL_SEARCH` /
+  `LORE_USE_RUNTOOL_AGGREGATE` flag plumbing in `config.ts` and
+  `services.ts`.
+
+Default flag state stays OFF until the criteria in
+"Default-On Criteria" of issue #532 are met.
