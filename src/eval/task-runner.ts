@@ -37,7 +37,9 @@
 import { existsSync } from "node:fs"
 import {
   cp,
+  chmod,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -46,11 +48,26 @@ import {
 } from "node:fs/promises"
 import { join, dirname, resolve, relative } from "node:path"
 import { tmpdir } from "node:os"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { spawn } from "node:child_process"
 import { performance } from "node:perf_hooks"
-import { parse as parseYaml } from "yaml"
+import { fileURLToPath } from "node:url"
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml"
 import { z } from "zod"
+import type { AuthSource } from "../config.js"
+import { resolveProjectByName } from "../core/project-scope.js"
+import {
+  loadWakeUpData,
+  type WakeUpData,
+} from "../core/wakeup.js"
+import { initServices, type LoreServices } from "../services.js"
+import type { Fact, Memory, Project } from "../types.js"
+import {
+  runConversationMining,
+  type MiningResult,
+} from "../hooks/conversation-mining.js"
+import { mergeHookDefaults } from "../hooks/config.js"
+import { formatTranscriptSessionContent } from "../hooks/transcript.js"
 import {
   TASK_EVAL_AGENTS,
   TASK_EVAL_MEMORY_CONDITIONS,
@@ -98,6 +115,15 @@ const verifierSchema = z.discriminatedUnion("type", [
       path: z.string().min(1),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("command"),
+      command: z.string().min(1),
+      args: z.array(z.string()).default([]),
+      cwd: z.string().min(1).optional(),
+      timeoutMs: z.number().int().positive().default(120_000),
+    })
+    .strict(),
 ])
 
 const memoryConditionSchema = z.enum(TASK_EVAL_MEMORY_CONDITIONS)
@@ -128,9 +154,11 @@ const taskEvalTaskSchema = z
   })
   .strict()
 
-export const taskEvalSuiteSchema = z
+const taskEvalStandardSuiteSchema = z
   .object({
     version: z.literal(TASK_EVAL_SUITE_VERSION),
+    runner: z.literal("task").optional(),
+    longitudinal: z.literal(false).optional(),
     name: z
       .string()
       .min(1)
@@ -154,9 +182,105 @@ export const taskEvalSuiteSchema = z
     }
   })
 
+const longitudinalConditionSchema = z.enum(["no-memory", "lore-full-loop"])
+
+const longitudinalPhaseSchema = z
+  .object({
+    promptId: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "must be kebab-case")
+      .optional(),
+    prompt: z.string().min(1),
+  })
+  .strict()
+
+const longitudinalExpectedContextSchema = z
+  .object({
+    description: z.string().default(""),
+    keywords: z.array(z.string().min(1)).default([]),
+    harmfulKeywords: z.array(z.string().min(1)).default([]),
+  })
+  .strict()
+  .default({})
+
+const longitudinalTaskScenarioSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "must be kebab-case"),
+    agent: z.enum(TASK_EVAL_AGENTS).default("codex"),
+    workspace: z.string().min(1),
+    phaseA: longitudinalPhaseSchema,
+    phaseB: longitudinalPhaseSchema,
+    expectedContext: longitudinalExpectedContextSchema,
+    verifiers: z.array(verifierSchema).min(1),
+    timeoutMs: z.number().int().positive().default(300_000),
+  })
+  .strict()
+
+export const longitudinalTaskEvalSuiteSchema = z
+  .object({
+    version: z.literal(TASK_EVAL_SUITE_VERSION),
+    runner: z.literal("task").optional(),
+    longitudinal: z.literal(true),
+    name: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "must be kebab-case"),
+    description: z.string().default(""),
+    conditions: z
+      .array(longitudinalConditionSchema)
+      .min(1)
+      .default(["no-memory", "lore-full-loop"]),
+    scenarios: z.array(longitudinalTaskScenarioSchema).min(1),
+  })
+  .strict()
+  .superRefine((suite, ctx) => {
+    const seenScenarios = new Set<string>()
+    for (let i = 0; i < suite.scenarios.length; i++) {
+      const id = suite.scenarios[i]!.id
+      if (seenScenarios.has(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["scenarios", i, "id"],
+          message: `duplicate scenario id "${id}"; ids must be unique within a suite`,
+        })
+      }
+      seenScenarios.add(id)
+    }
+
+    const seenConditions = new Set<string>()
+    for (let i = 0; i < suite.conditions.length; i++) {
+      const condition = suite.conditions[i]!
+      if (seenConditions.has(condition)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["conditions", i],
+          message: `duplicate condition "${condition}"; conditions must be unique`,
+        })
+      }
+      seenConditions.add(condition)
+    }
+  })
+
+export const taskEvalSuiteSchema = z.union([
+  longitudinalTaskEvalSuiteSchema,
+  taskEvalStandardSuiteSchema,
+])
+
 export type TaskEvalVerifier = z.infer<typeof verifierSchema>
 export type TaskEvalTask = z.infer<typeof taskEvalTaskSchema>
-export type TaskEvalSuite = z.infer<typeof taskEvalSuiteSchema>
+export type TaskEvalStandardSuite = z.infer<typeof taskEvalStandardSuiteSchema>
+export type LongitudinalTaskCondition = z.infer<typeof longitudinalConditionSchema>
+export type LongitudinalTaskScenario = z.infer<
+  typeof longitudinalTaskScenarioSchema
+>
+export type LongitudinalTaskEvalSuite = z.infer<
+  typeof longitudinalTaskEvalSuiteSchema
+>
+export type TaskEvalSuite = TaskEvalStandardSuite | LongitudinalTaskEvalSuite
 
 export interface AgentRunInput {
   prompt: string
@@ -213,6 +337,12 @@ export type TaskFailureReason =
   | "agent-exit"
   | "verifiers"
 
+export type LongitudinalFailureReason =
+  | TaskFailureReason
+  | "formation"
+  | "wake-up"
+  | "expected-context"
+
 export interface TaskEvalResult {
   taskId: string
   agent: string
@@ -229,6 +359,78 @@ export interface TaskEvalResult {
   metrics: {
     elapsedMs: number
   }
+}
+
+export interface PatchStats {
+  filesChanged: number
+  linesAdded: number
+  linesRemoved: number
+}
+
+export interface LongitudinalLoreMetrics {
+  hooksEnabled: boolean
+  wakeUpEnabled: boolean
+  memoriesCreated: number
+  factsCreated: number
+  decisionsCreated: number
+  tasksCreated: number
+  expectedContextIds: string[]
+  surfacedContextIds: string[]
+  harmfulContextIds: string[]
+}
+
+export interface LongitudinalCostMetrics {
+  promptTokens: number | null
+  completionTokens: number | null
+  totalUsd: number | null
+}
+
+export interface LongitudinalPhaseResult {
+  phase: "formation" | "use"
+  promptId: string
+  workspace: string | null
+  startedAt: string
+  finishedAt: string
+  success: boolean
+  agentRun: AgentRunResult | null
+  verifierResults: VerifierResult[]
+  patchStats: PatchStats
+  lore: LongitudinalLoreMetrics
+  cost: LongitudinalCostMetrics | null
+  elapsedMs: number
+  failureReason: LongitudinalFailureReason | null
+  failureMessage: string | null
+}
+
+export interface LongitudinalTaskResult {
+  taskId: string
+  scenarioId: string
+  condition: LongitudinalTaskCondition
+  memoryCondition: null
+  agent: string
+  workspaceSource: string
+  workspace: string | null
+  success: boolean
+  failureReason: LongitudinalFailureReason | null
+  agentRun: AgentRunResult | null
+  verifiers: VerifierResult[]
+  phases: LongitudinalPhaseResult[]
+  expectedContextDescription: string
+}
+
+export interface LongitudinalConditionSummary {
+  trials: number
+  passed: number
+  failed: number
+  successRate: number
+}
+
+export interface LongitudinalLiftSummary {
+  fromCondition: "no-memory"
+  toCondition: "lore-full-loop"
+  successRateDelta: number | null
+  liftedScenarioIds: string[]
+  harmedScenarioIds: string[]
 }
 
 export interface TaskEvalArtifact {
@@ -248,6 +450,71 @@ export interface TaskEvalArtifact {
   }
 }
 
+export interface LongitudinalTaskArtifact {
+  suite: string
+  description: string
+  startedAt: string
+  runner: { mode: "task"; kind: "longitudinal" }
+  results: LongitudinalTaskResult[]
+  summary: {
+    tasks: number
+    passedTasks: number
+    failedTasks: number
+    totalTrials: number
+    passedTrials: number
+    failedTrials: number
+    conditions: Record<LongitudinalTaskCondition, LongitudinalConditionSummary>
+    lift: LongitudinalLiftSummary
+  }
+}
+
+export type AnyTaskEvalArtifact = TaskEvalArtifact | LongitudinalTaskArtifact
+
+export interface LongitudinalLoreFormationResult {
+  projectId: string | null
+  projectName: string | null
+  mining: MiningResult | null
+  memoriesCreated: number
+  factsCreated: number
+  decisionsCreated: number
+  tasksCreated: number
+  createdContextIds: string[]
+  expectedContextIds: string[]
+}
+
+export interface LongitudinalWakeUpResult {
+  renderedContext: string
+  surfacedContextIds: string[]
+  harmfulContextIds: string[]
+  failureMessage: string | null
+}
+
+export interface LongitudinalLoreRun {
+  projectId: string | null
+  projectName: string | null
+  formContext(input: {
+    scenario: LongitudinalTaskScenario
+    transcript: string
+    workspace: string
+    sessionId: string
+  }): Promise<LongitudinalLoreFormationResult>
+  loadContext(input: {
+    scenario: LongitudinalTaskScenario
+    phaseBPrompt: string
+    expectedContextIds: string[]
+  }): Promise<LongitudinalWakeUpResult>
+  cleanup(): Promise<void>
+}
+
+export interface LongitudinalLoreAdapter {
+  createRun(input: {
+    suite: LongitudinalTaskEvalSuite
+    scenario: LongitudinalTaskScenario
+    runId: string
+    workspace: string
+  }): Promise<LongitudinalLoreRun>
+}
+
 export interface RunTaskEvalOptions {
   outPath?: string
   now?: Date
@@ -264,6 +531,12 @@ export interface RunTaskEvalOptions {
    * creates to avoid filling the disk with model-generated content.
    */
   keepWorkspaces?: boolean
+  /**
+   * Programmatic seam for tests and dry runs. Production callers leave
+   * this unset; the runner builds a live Notion-backed adapter only when
+   * the longitudinal real-run env gate is enabled.
+   */
+  longitudinalLoreAdapter?: LongitudinalLoreAdapter
 }
 
 export async function loadTaskEvalSuite(path: string): Promise<{
@@ -281,8 +554,15 @@ export async function loadTaskEvalSuite(path: string): Promise<{
 export async function runTaskEvalSuite(
   suitePath: string,
   options: RunTaskEvalOptions = {}
-): Promise<{ artifact: TaskEvalArtifact; outPath: string }> {
+): Promise<{ artifact: AnyTaskEvalArtifact; outPath: string }> {
   const loaded = await loadTaskEvalSuite(suitePath)
+  if (isLongitudinalTaskEvalSuite(loaded.suite)) {
+    return runLongitudinalTaskEvalSuite(
+      { suite: loaded.suite, root: loaded.root, path: loaded.path },
+      options
+    )
+  }
+
   const adapters = options.adapters ?? defaultAdapters()
   const startedAt = (options.now ?? new Date()).toISOString()
 
@@ -345,7 +625,519 @@ export async function runTaskEvalSuite(
   return { artifact, outPath }
 }
 
-function countTasksAllPassed(results: TaskEvalResult[]): number {
+async function runLongitudinalTaskEvalSuite(
+  loaded: { suite: LongitudinalTaskEvalSuite; root: string; path: string },
+  options: RunTaskEvalOptions
+): Promise<{ artifact: LongitudinalTaskArtifact; outPath: string }> {
+  const adapters = options.adapters ?? defaultAdapters()
+  const startedAt = (options.now ?? new Date()).toISOString()
+  const loreAdapter =
+    options.longitudinalLoreAdapter ?? defaultLongitudinalLoreAdapter()
+
+  const results: LongitudinalTaskResult[] = []
+  for (const scenario of loaded.suite.scenarios) {
+    for (const condition of loaded.suite.conditions) {
+      results.push(
+        await runLongitudinalTrial({
+          suite: loaded.suite,
+          scenario,
+          condition,
+          suiteRoot: loaded.root,
+          adapters,
+          keepWorkspaces: options.keepWorkspaces ?? false,
+          loreAdapter,
+        })
+      )
+    }
+  }
+
+  const summary = summarizeLongitudinalResults(
+    loaded.suite.scenarios.map((scenario) => scenario.id),
+    results
+  )
+  const artifact: LongitudinalTaskArtifact = {
+    suite: loaded.suite.name,
+    description: loaded.suite.description,
+    startedAt,
+    runner: { mode: "task", kind: "longitudinal" },
+    results,
+    summary,
+  }
+
+  const outPath = resolve(
+    options.outPath ?? defaultArtifactPath(loaded.suite.name, startedAt)
+  )
+  await mkdir(dirname(outPath), { recursive: true })
+  await writeFile(outPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf-8")
+  return { artifact, outPath }
+}
+
+function isLongitudinalTaskEvalSuite(
+  suite: TaskEvalSuite
+): suite is LongitudinalTaskEvalSuite {
+  return "longitudinal" in suite && suite.longitudinal === true
+}
+
+export function isLongitudinalTaskArtifact(
+  artifact: AnyTaskEvalArtifact
+): artifact is LongitudinalTaskArtifact {
+  return artifact.runner.mode === "task" && "kind" in artifact.runner
+}
+
+async function runLongitudinalTrial(input: {
+  suite: LongitudinalTaskEvalSuite
+  scenario: LongitudinalTaskScenario
+  condition: LongitudinalTaskCondition
+  suiteRoot: string
+  adapters: Map<string, AgentAdapter>
+  keepWorkspaces: boolean
+  loreAdapter: LongitudinalLoreAdapter
+}): Promise<LongitudinalTaskResult> {
+  const adapter = input.adapters.get(input.scenario.agent)
+  if (!adapter) {
+    throw new Error(
+      `No adapter registered for agent "${input.scenario.agent}"; pass one via RunTaskEvalOptions.adapters.`
+    )
+  }
+
+  const workspaceSource = resolve(input.suiteRoot, input.scenario.workspace)
+  const workspace = await prepareWorkspace({
+    source: workspaceSource,
+    suiteRoot: input.suiteRoot,
+    declaredPath: input.scenario.workspace,
+  })
+  await removeLongitudinalAgentConfig(workspace)
+  const runId = `longitudinal-${input.scenario.id}-${randomUUID().slice(0, 8)}`
+  let loreRun: LongitudinalLoreRun | null = null
+  const phases: LongitudinalPhaseResult[] = []
+
+  try {
+    if (input.condition === "lore-full-loop") {
+      loreRun = await input.loreAdapter.createRun({
+        suite: input.suite,
+        scenario: input.scenario,
+        runId,
+        workspace,
+      })
+      await removeLongitudinalAgentConfig(workspace)
+    }
+
+    const formationSessionId = `${runId}-formation`
+    const formationPhase = await runLongitudinalFormationPhase({
+      scenario: input.scenario,
+      condition: input.condition,
+      adapter,
+      workspace,
+      workspaceSource,
+      loreRun,
+      sessionId: formationSessionId,
+    })
+    phases.push(formationPhase)
+    await removeLongitudinalAgentConfig(workspace)
+
+    const expectedContextIds = formationPhase.lore.expectedContextIds
+    const usePhase = formationPhase.success
+      ? await runLongitudinalUsePhase({
+          scenario: input.scenario,
+          condition: input.condition,
+          adapter,
+          workspace,
+          workspaceSource,
+          wakeUp:
+            input.condition === "lore-full-loop" && loreRun
+              ? await loadLongitudinalWakeUp({
+                  loreRun,
+                  scenario: input.scenario,
+                  phaseBPrompt: input.scenario.phaseB.prompt,
+                  expectedContextIds,
+                })
+              : emptyWakeUpResult(),
+          expectedContextIds,
+        })
+      : await skippedLongitudinalUsePhase({
+          scenario: input.scenario,
+          condition: input.condition,
+          workspace,
+          workspaceSource,
+          expectedContextIds,
+          formationPhase,
+        })
+    phases.push(usePhase)
+
+    const success = phases.every((phase) => phase.success)
+    return {
+      taskId: input.scenario.id,
+      scenarioId: input.scenario.id,
+      condition: input.condition,
+      memoryCondition: null,
+      agent: input.scenario.agent,
+      workspaceSource,
+      workspace: input.keepWorkspaces ? workspace : null,
+      success,
+      failureReason: success ? null : firstLongitudinalFailure(phases),
+      agentRun: usePhase.agentRun,
+      verifiers: usePhase.verifierResults,
+      phases,
+      expectedContextDescription: input.scenario.expectedContext.description,
+    }
+  } finally {
+    if (loreRun) {
+      await loreRun.cleanup()
+    }
+    if (!input.keepWorkspaces) {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  }
+}
+
+async function runLongitudinalFormationPhase(input: {
+  scenario: LongitudinalTaskScenario
+  condition: LongitudinalTaskCondition
+  adapter: AgentAdapter
+  workspace: string
+  workspaceSource: string
+  loreRun: LongitudinalLoreRun | null
+  sessionId: string
+}): Promise<LongitudinalPhaseResult> {
+  const startedAt = new Date().toISOString()
+  const before = performance.now()
+  const agentRun = await input.adapter.run({
+    prompt: input.scenario.phaseA.prompt,
+    workspace: input.workspace,
+    timeoutMs: input.scenario.timeoutMs,
+  })
+  const patchStats = await computePatchStats(input.workspaceSource, input.workspace)
+  const agentSucceeded = agentRun.exitCode === 0 && !agentRun.timedOut
+  let lore = emptyLongitudinalLoreMetrics({
+    hooksEnabled: input.condition === "lore-full-loop",
+    wakeUpEnabled: false,
+  })
+  let failureReason: LongitudinalFailureReason | null = agentSucceeded
+    ? null
+    : deriveFailureReason(false, agentRun, [])
+  let failureMessage: string | null = agentSucceeded
+    ? null
+    : firstAgentFailureMessage(agentRun)
+
+  if (input.condition === "lore-full-loop" && input.loreRun && agentSucceeded) {
+    try {
+      const transcript = formatTranscriptSessionContent([
+        { role: "user", text: input.scenario.phaseA.prompt },
+        { role: "assistant", text: summarizeAgentResponse(agentRun) },
+      ])
+      const formed = await input.loreRun.formContext({
+        scenario: input.scenario,
+        transcript,
+        workspace: input.workspace,
+        sessionId: input.sessionId,
+      })
+      lore = {
+        hooksEnabled: true,
+        wakeUpEnabled: false,
+        memoriesCreated: formed.memoriesCreated,
+        factsCreated: formed.factsCreated,
+        decisionsCreated: formed.decisionsCreated,
+        tasksCreated: formed.tasksCreated,
+        expectedContextIds: formed.expectedContextIds,
+        surfacedContextIds: [],
+        harmfulContextIds: [],
+      }
+      const miningSucceeded =
+        formed.mining === null ||
+        (formed.mining.exitCode === 0 && formed.mining.exitSignal === null)
+      if (!miningSucceeded && failureReason === null) {
+        failureReason = "formation"
+        failureMessage = formatMiningFailure(formed.mining)
+      }
+      if (
+        input.scenario.expectedContext.keywords.length > 0 &&
+        formed.expectedContextIds.length === 0 &&
+        failureReason === null
+      ) {
+        failureReason = "expected-context"
+        failureMessage =
+          "Formation did not create context matching the scenario's expected keywords."
+      }
+    } catch (err) {
+      if (failureReason === null) {
+        failureReason = err instanceof LongitudinalAdapterRefusedError
+          ? "adapter-refused"
+          : "formation"
+        failureMessage = err instanceof Error ? err.message : String(err)
+      }
+    }
+  }
+
+  const success = failureReason === null
+  return {
+    phase: "formation",
+    promptId: promptIdFor(input.scenario, "formation"),
+    workspace: null,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    success,
+    agentRun,
+    verifierResults: [],
+    patchStats,
+    lore,
+    cost: null,
+    elapsedMs: roundMs(performance.now() - before),
+    failureReason,
+    failureMessage,
+  }
+}
+
+async function runLongitudinalUsePhase(input: {
+  scenario: LongitudinalTaskScenario
+  condition: LongitudinalTaskCondition
+  adapter: AgentAdapter
+  workspace: string
+  workspaceSource: string
+  wakeUp: LongitudinalWakeUpResult
+  expectedContextIds: string[]
+}): Promise<LongitudinalPhaseResult> {
+  const startedAt = new Date().toISOString()
+  const before = performance.now()
+  if (
+    input.wakeUp.failureMessage !== null &&
+    input.wakeUp.failureMessage !== undefined
+  ) {
+    const patchStats = await computePatchStats(input.workspaceSource, input.workspace)
+    return {
+      phase: "use",
+      promptId: promptIdFor(input.scenario, "use"),
+      workspace: null,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      success: false,
+      agentRun: null,
+      verifierResults: [],
+      patchStats,
+      lore: {
+        hooksEnabled: input.condition === "lore-full-loop",
+        wakeUpEnabled: input.condition === "lore-full-loop",
+        memoriesCreated: 0,
+        factsCreated: 0,
+        decisionsCreated: 0,
+        tasksCreated: 0,
+        expectedContextIds: input.expectedContextIds,
+        surfacedContextIds: input.wakeUp.surfacedContextIds,
+        harmfulContextIds: input.wakeUp.harmfulContextIds,
+      },
+      cost: null,
+      elapsedMs: roundMs(performance.now() - before),
+      failureReason: "wake-up",
+      failureMessage: input.wakeUp.failureMessage,
+    }
+  }
+
+  const prompt =
+    input.condition === "lore-full-loop"
+      ? withWakeUpContext(input.scenario.phaseB.prompt, input.wakeUp.renderedContext)
+      : input.scenario.phaseB.prompt
+  const agentRun = await input.adapter.run({
+    prompt,
+    workspace: input.workspace,
+    timeoutMs: input.scenario.timeoutMs,
+  })
+  const verifierResults: VerifierResult[] = []
+  for (const verifier of input.scenario.verifiers) {
+    verifierResults.push(await runVerifier(verifier, input.workspace, input.workspaceSource))
+  }
+  const patchStats = await computePatchStats(input.workspaceSource, input.workspace)
+  const expectedSurfaced =
+    input.condition !== "lore-full-loop" ||
+    input.expectedContextIds.length === 0 ||
+    input.expectedContextIds.some((id) => input.wakeUp.surfacedContextIds.includes(id))
+  const agentSucceeded = agentRun.exitCode === 0 && !agentRun.timedOut
+  const verifierSucceeded = verifierResults.every((r) => r.passed)
+  let failureReason: LongitudinalFailureReason | null = null
+  let failureMessage: string | null = null
+  if (!agentSucceeded) {
+    failureReason = deriveFailureReason(false, agentRun, verifierResults)
+    failureMessage = firstAgentFailureMessage(agentRun)
+  } else if (!verifierSucceeded) {
+    failureReason = "verifiers"
+    failureMessage = verifierResults
+      .filter((r) => !r.passed)
+      .map((r) => r.message)
+      .join("; ")
+  } else if (!expectedSurfaced) {
+    failureReason = "expected-context"
+    failureMessage =
+      "Wake-up did not surface any expected context id created during formation."
+  }
+
+  return {
+    phase: "use",
+    promptId: promptIdFor(input.scenario, "use"),
+    workspace: null,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    success: failureReason === null,
+    agentRun,
+    verifierResults,
+    patchStats,
+    lore: {
+      hooksEnabled: input.condition === "lore-full-loop",
+      wakeUpEnabled: input.condition === "lore-full-loop",
+      memoriesCreated: 0,
+      factsCreated: 0,
+      decisionsCreated: 0,
+      tasksCreated: 0,
+      expectedContextIds: input.expectedContextIds,
+      surfacedContextIds: input.wakeUp.surfacedContextIds,
+      harmfulContextIds: input.wakeUp.harmfulContextIds,
+    },
+    cost: null,
+    elapsedMs: roundMs(performance.now() - before),
+    failureReason,
+    failureMessage,
+  }
+}
+
+async function skippedLongitudinalUsePhase(input: {
+  scenario: LongitudinalTaskScenario
+  condition: LongitudinalTaskCondition
+  workspace: string
+  workspaceSource: string
+  expectedContextIds: string[]
+  formationPhase: LongitudinalPhaseResult
+}): Promise<LongitudinalPhaseResult> {
+  const startedAt = new Date().toISOString()
+  const before = performance.now()
+  const patchStats = await computePatchStats(input.workspaceSource, input.workspace)
+  const failureReason = input.formationPhase.failureReason ?? "formation"
+  const detail =
+    input.formationPhase.failureMessage ??
+    input.formationPhase.failureReason ??
+    "formation failed"
+  return {
+    phase: "use",
+    promptId: promptIdFor(input.scenario, "use"),
+    workspace: null,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    success: false,
+    agentRun: null,
+    verifierResults: [],
+    patchStats,
+    lore: {
+      hooksEnabled: input.condition === "lore-full-loop",
+      wakeUpEnabled: false,
+      memoriesCreated: 0,
+      factsCreated: 0,
+      decisionsCreated: 0,
+      tasksCreated: 0,
+      expectedContextIds: input.expectedContextIds,
+      surfacedContextIds: [],
+      harmfulContextIds: [],
+    },
+    cost: null,
+    elapsedMs: roundMs(performance.now() - before),
+    failureReason,
+    failureMessage: `Skipped Phase B because formation failed: ${detail}`,
+  }
+}
+
+async function loadLongitudinalWakeUp(input: {
+  loreRun: LongitudinalLoreRun
+  scenario: LongitudinalTaskScenario
+  phaseBPrompt: string
+  expectedContextIds: string[]
+}): Promise<LongitudinalWakeUpResult> {
+  try {
+    return await input.loreRun.loadContext({
+      scenario: input.scenario,
+      phaseBPrompt: input.phaseBPrompt,
+      expectedContextIds: input.expectedContextIds,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      renderedContext: "",
+      surfacedContextIds: [],
+      harmfulContextIds: [],
+      failureMessage: `Lore wake-up failed: ${message}`,
+    }
+  }
+}
+
+function summarizeLongitudinalResults(
+  scenarioIds: string[],
+  results: LongitudinalTaskResult[]
+): LongitudinalTaskArtifact["summary"] {
+  const conditions: Record<
+    LongitudinalTaskCondition,
+    LongitudinalConditionSummary
+  > = {
+    "no-memory": emptyConditionSummary(),
+    "lore-full-loop": emptyConditionSummary(),
+  }
+  for (const result of results) {
+    const summary = conditions[result.condition]
+    summary.trials += 1
+    if (result.success) summary.passed += 1
+    else summary.failed += 1
+  }
+  for (const summary of Object.values(conditions)) {
+    summary.successRate =
+      summary.trials === 0 ? 0 : roundRate(summary.passed / summary.trials)
+  }
+
+  const liftedScenarioIds: string[] = []
+  const harmedScenarioIds: string[] = []
+  for (const scenarioId of scenarioIds) {
+    const noMemory = results.find(
+      (r) => r.scenarioId === scenarioId && r.condition === "no-memory"
+    )
+    const fullLoop = results.find(
+      (r) => r.scenarioId === scenarioId && r.condition === "lore-full-loop"
+    )
+    if (!noMemory || !fullLoop) continue
+    if (!noMemory.success && fullLoop.success) liftedScenarioIds.push(scenarioId)
+    if (noMemory.success && !fullLoop.success) harmedScenarioIds.push(scenarioId)
+  }
+
+  const noMemoryRate = conditions["no-memory"].successRate
+  const fullLoopRate = conditions["lore-full-loop"].successRate
+  const successRateDelta =
+    conditions["no-memory"].trials === 0 ||
+    conditions["lore-full-loop"].trials === 0
+      ? null
+      : roundRate(fullLoopRate - noMemoryRate)
+  const passedTrials = results.filter((r) => r.success).length
+  const passedTasks = countTasksAllPassed(
+    results.map((result) => ({
+      taskId: result.scenarioId,
+      success: result.success,
+    }))
+  )
+  return {
+    tasks: scenarioIds.length,
+    passedTasks,
+    failedTasks: scenarioIds.length - passedTasks,
+    totalTrials: results.length,
+    passedTrials,
+    failedTrials: results.length - passedTrials,
+    conditions,
+    lift: {
+      fromCondition: "no-memory",
+      toCondition: "lore-full-loop",
+      successRateDelta,
+      liftedScenarioIds,
+      harmedScenarioIds,
+    },
+  }
+}
+
+function emptyConditionSummary(): LongitudinalConditionSummary {
+  return { trials: 0, passed: 0, failed: 0, successRate: 0 }
+}
+
+function countTasksAllPassed(
+  results: Array<Pick<TaskEvalResult, "taskId" | "success">>
+): number {
   const successByTask = new Map<string, boolean>()
   for (const result of results) {
     const prior = successByTask.get(result.taskId)
@@ -506,6 +1298,9 @@ async function runVerifier(
   workspace: string,
   workspaceSource: string
 ): Promise<VerifierResult> {
+  if (verifier.type === "command") {
+    return runCommandVerifier(verifier, workspace)
+  }
   const target = resolve(workspace, verifier.path)
   if (!isInsideWorkspace(target, workspace)) {
     return {
@@ -588,6 +1383,120 @@ async function runVerifier(
   }
 }
 
+async function runCommandVerifier(
+  verifier: Extract<TaskEvalVerifier, { type: "command" }>,
+  workspace: string
+): Promise<VerifierResult> {
+  const cwd = resolve(workspace, verifier.cwd ?? ".")
+  if (!isInsideWorkspace(cwd, workspace)) {
+    return {
+      verifier,
+      passed: false,
+      message: `Command cwd "${verifier.cwd ?? "."}" escapes the workspace`,
+    }
+  }
+
+  const result = await runVerifierCommand({
+    command: verifier.command,
+    args: verifier.args,
+    cwd,
+    timeoutMs: verifier.timeoutMs,
+  })
+  if (result.timedOut) {
+    return {
+      verifier,
+      passed: false,
+      message: `Command timed out after ${verifier.timeoutMs}ms: ${formatCommand(verifier)}`,
+    }
+  }
+  if (result.exitCode !== 0) {
+    return {
+      verifier,
+      passed: false,
+      message:
+        `Command failed (${result.exitCode}): ${formatCommand(verifier)}` +
+        firstCommandOutput(result),
+    }
+  }
+  return {
+    verifier,
+    passed: true,
+    message: `Command passed: ${formatCommand(verifier)}`,
+  }
+}
+
+function runVerifierCommand(input: {
+  command: string
+  args: string[]
+  cwd: string
+  timeoutMs: number
+}): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+  return new Promise((resolveRun) => {
+    const child = spawn(input.command, input.args, {
+      cwd: input.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildVerifierChildEnv(),
+      detached: true,
+    })
+    const stdoutCapture = makeCappedCapture()
+    const stderrCapture = makeCappedCapture()
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL")
+        else child.kill("SIGKILL")
+      } catch {
+        // Process already exited.
+      }
+    }, input.timeoutMs)
+    child.stdout?.on("data", (c: Buffer) => appendCappedChunk(stdoutCapture, c))
+    child.stderr?.on("data", (c: Buffer) => appendCappedChunk(stderrCapture, c))
+    child.on("error", (err) => {
+      clearTimeout(timer)
+      resolveRun({
+        exitCode: -1,
+        stdout: joinCappedCapture(stdoutCapture),
+        stderr: joinCappedCapture(stderrCapture) + `\n[spawn-error] ${err}`,
+        timedOut,
+      })
+    })
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      resolveRun({
+        exitCode: code ?? -1,
+        stdout: joinCappedCapture(stdoutCapture),
+        stderr: joinCappedCapture(stderrCapture),
+        timedOut,
+      })
+    })
+  })
+}
+
+function buildVerifierChildEnv(
+  parentEnv: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  for (const key of ["PATH", "HOME", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_CTYPE"]) {
+    const value = parentEnv[key]
+    if (value !== undefined) out[key] = value
+  }
+  out["CI"] = parentEnv["CI"] ?? "1"
+  return out
+}
+
+function formatCommand(verifier: Extract<TaskEvalVerifier, { type: "command" }>): string {
+  return [verifier.command, ...verifier.args].join(" ")
+}
+
+function firstCommandOutput(input: { stdout: string; stderr: string }): string {
+  const firstLine = `${input.stderr}\n${input.stdout}`
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0)
+  return firstLine ? `; ${firstLine}` : ""
+}
+
 async function hashFile(path: string): Promise<string> {
   const buf = await readFile(path)
   return createHash("sha256").update(buf).digest("hex")
@@ -598,8 +1507,199 @@ function isInsideWorkspace(target: string, workspace: string): boolean {
   return !rel.startsWith("..") && !rel.startsWith("/")
 }
 
+async function computePatchStats(
+  sourceRoot: string,
+  workspaceRoot: string
+): Promise<PatchStats> {
+  const [sourceFiles, workspaceFiles] = await Promise.all([
+    listRelativeFiles(sourceRoot),
+    listRelativeFiles(workspaceRoot),
+  ])
+  const allFiles = new Set([...sourceFiles, ...workspaceFiles])
+  let filesChanged = 0
+  let linesAdded = 0
+  let linesRemoved = 0
+  for (const file of [...allFiles].sort()) {
+    const sourcePath = join(sourceRoot, file)
+    const workspacePath = join(workspaceRoot, file)
+    const sourceExists = sourceFiles.includes(file)
+    const workspaceExists = workspaceFiles.includes(file)
+    const sourceText = sourceExists ? await readTextForStats(sourcePath) : null
+    const workspaceText = workspaceExists ? await readTextForStats(workspacePath) : null
+    if (sourceText === workspaceText) continue
+    filesChanged += 1
+    const diff = diffLineCounts(sourceText, workspaceText)
+    linesAdded += diff.added
+    linesRemoved += diff.removed
+  }
+  return { filesChanged, linesAdded, linesRemoved }
+}
+
+const PATCH_STATS_IGNORED_NAMES = new Set([
+  ".codex",
+  ".git",
+  ".lore-memories.json",
+  ".lore.yaml",
+  ".mcp.json",
+  "node_modules",
+])
+
+async function listRelativeFiles(root: string): Promise<string[]> {
+  const files: string[] = []
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (PATCH_STATS_IGNORED_NAMES.has(entry.name)) continue
+      const absolute = join(dir, entry.name)
+      const rel = relative(root, absolute)
+      if (entry.isDirectory()) {
+        await walk(absolute)
+      } else if (entry.isFile()) {
+        files.push(rel)
+      }
+    }
+  }
+  await walk(root)
+  return files.sort()
+}
+
+async function readTextForStats(path: string): Promise<string> {
+  const buffer = await readFile(path)
+  if (buffer.includes(0)) return ""
+  return buffer.toString("utf-8")
+}
+
+function diffLineCounts(
+  before: string | null,
+  after: string | null
+): { added: number; removed: number } {
+  const beforeLines = splitDiffLines(before ?? "")
+  const afterLines = splitDiffLines(after ?? "")
+  if (before === null) return { added: afterLines.length, removed: 0 }
+  if (after === null) return { added: 0, removed: beforeLines.length }
+  const lcs = longestCommonSubsequenceLength(beforeLines, afterLines)
+  return {
+    added: Math.max(0, afterLines.length - lcs),
+    removed: Math.max(0, beforeLines.length - lcs),
+  }
+}
+
+function splitDiffLines(text: string): string[] {
+  if (text.length === 0) return []
+  const normalized = text.endsWith("\n") ? text.slice(0, -1) : text
+  if (normalized.length === 0) return []
+  return normalized.split(/\r?\n/)
+}
+
+function longestCommonSubsequenceLength(a: string[], b: string[]): number {
+  if (a.length * b.length > 1_000_000) {
+    const shared = new Set(a)
+    return b.filter((line) => shared.has(line)).length
+  }
+  const row = new Array<number>(b.length + 1).fill(0)
+  for (let i = 1; i <= a.length; i++) {
+    let prev = 0
+    for (let j = 1; j <= b.length; j++) {
+      const temp = row[j]!
+      row[j] = a[i - 1] === b[j - 1] ? prev + 1 : Math.max(row[j]!, row[j - 1]!)
+      prev = temp
+    }
+  }
+  return row[b.length]!
+}
+
 function roundMs(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+function roundRate(value: number): number {
+  return Math.round(value * 10_000) / 10_000
+}
+
+function promptIdFor(
+  scenario: LongitudinalTaskScenario,
+  phase: "formation" | "use"
+): string {
+  if (phase === "formation") return scenario.phaseA.promptId ?? `${scenario.id}-phase-a`
+  return scenario.phaseB.promptId ?? `${scenario.id}-phase-b`
+}
+
+function emptyLongitudinalLoreMetrics(input: {
+  hooksEnabled: boolean
+  wakeUpEnabled: boolean
+}): LongitudinalLoreMetrics {
+  return {
+    hooksEnabled: input.hooksEnabled,
+    wakeUpEnabled: input.wakeUpEnabled,
+    memoriesCreated: 0,
+    factsCreated: 0,
+    decisionsCreated: 0,
+    tasksCreated: 0,
+    expectedContextIds: [],
+    surfacedContextIds: [],
+    harmfulContextIds: [],
+  }
+}
+
+function emptyWakeUpResult(): LongitudinalWakeUpResult {
+  return {
+    renderedContext: "",
+    surfacedContextIds: [],
+    harmfulContextIds: [],
+    failureMessage: null,
+  }
+}
+
+function withWakeUpContext(prompt: string, renderedContext: string): string {
+  if (renderedContext.trim().length === 0) return prompt
+  return [
+    "Retrieved Lore context from the previous session:",
+    "",
+    renderedContext.trim(),
+    "",
+    "Current task:",
+    prompt,
+  ].join("\n")
+}
+
+function firstLongitudinalFailure(
+  phases: LongitudinalPhaseResult[]
+): LongitudinalFailureReason | null {
+  return phases.find((phase) => !phase.success)?.failureReason ?? null
+}
+
+function firstAgentFailureMessage(agentRun: AgentRunResult): string | null {
+  if (agentRun.refused) return firstNonEmptyLine(agentRun.stderr) ?? "Adapter refused"
+  if (agentRun.timedOut) return "Agent timed out"
+  if (agentRun.exitCode !== 0) {
+    return firstNonEmptyLine(agentRun.stderr) ?? `Agent exited with code ${agentRun.exitCode}`
+  }
+  return null
+}
+
+function firstNonEmptyLine(text: string): string | null {
+  return (
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? null
+  )
+}
+
+function summarizeAgentResponse(agentRun: AgentRunResult): string {
+  const stdout = agentRun.stdout.trim()
+  if (stdout.length > 0) return stdout
+  const stderr = agentRun.stderr.trim()
+  if (stderr.length > 0) return stderr
+  return `Agent exited with code ${agentRun.exitCode}.`
+}
+
+function formatMiningFailure(mining: MiningResult | null): string {
+  if (mining === null) return "Mining did not run."
+  if (mining.exitSignal) {
+    return `Mining child exited via ${mining.exitSignal} after ${mining.elapsedMs}ms.`
+  }
+  return `Mining child exited with code ${mining.exitCode}.`
 }
 
 function defaultArtifactPath(suiteName: string, startedAt: string): string {
@@ -611,6 +1711,556 @@ function defaultAdapters(): Map<string, AgentAdapter> {
   // Note: no `mock` entry. A committed YAML cannot reference an agent
   // without a production adapter; tests build their own adapter map.
   return new Map<string, AgentAdapter>([["codex", new CodexAgentAdapter()]])
+}
+
+function defaultLongitudinalLoreAdapter(): LongitudinalLoreAdapter {
+  const allowReal = process.env["LORE_EVAL_LONGITUDINAL_REAL"]
+  if (allowReal === "1" || allowReal === "true") {
+    return new LiveLongitudinalLoreAdapter()
+  }
+  return new RefusingLongitudinalLoreAdapter(
+    "Real longitudinal Lore formation refused: set " +
+      "LORE_EVAL_LONGITUDINAL_REAL=1 and " +
+      "LORE_EVAL_LONGITUDINAL_SANDBOX_PROJECT to opt in."
+  )
+}
+
+export class LongitudinalAdapterRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "LongitudinalAdapterRefusedError"
+  }
+}
+
+class RefusingLongitudinalLoreAdapter implements LongitudinalLoreAdapter {
+  constructor(private readonly message: string) {}
+
+  async createRun(): Promise<LongitudinalLoreRun> {
+    const message = this.message
+    return {
+      projectId: null,
+      projectName: null,
+      async formContext(): Promise<LongitudinalLoreFormationResult> {
+        throw new LongitudinalAdapterRefusedError(message)
+      },
+      async loadContext(): Promise<LongitudinalWakeUpResult> {
+        throw new LongitudinalAdapterRefusedError(message)
+      },
+      async cleanup(): Promise<void> {},
+    }
+  }
+}
+
+class LiveLongitudinalLoreAdapter implements LongitudinalLoreAdapter {
+  private servicesPromise: Promise<LoreServices> | null = null
+
+  async createRun(input: {
+    suite: LongitudinalTaskEvalSuite
+    scenario: LongitudinalTaskScenario
+    runId: string
+    workspace: string
+  }): Promise<LongitudinalLoreRun> {
+    const services = await this.services()
+    const sandboxProjectName = process.env["LORE_EVAL_LONGITUDINAL_SANDBOX_PROJECT"]
+    if (!sandboxProjectName) {
+      throw new LongitudinalAdapterRefusedError(
+        "LORE_EVAL_LONGITUDINAL_SANDBOX_PROJECT is required for lore-full-loop runs."
+      )
+    }
+    assertLongitudinalSandboxProjectName(sandboxProjectName)
+    const parentProject = await resolveProjectByName(
+      services.projects,
+      sandboxProjectName,
+      "longitudinal eval sandbox"
+    )
+    const projectName = `${parentProject.name}/${input.runId}`
+    const project = await services.projects.create({
+      name: projectName,
+      path: ".",
+      description:
+        `Longitudinal eval project for suite ${input.suite.name}, ` +
+        `scenario ${input.scenario.id}.`,
+    })
+    let configRoot: string | null = null
+    try {
+      configRoot = await mkdtemp(join(tmpdir(), "lore-eval-longitudinal-config-"))
+      await chmod(configRoot, 0o700)
+      await writeLongitudinalConfigRoot({
+        configRoot,
+        services,
+        projectName: project.name,
+      })
+      return new LiveLongitudinalLoreRun({
+        services,
+        project,
+        configRoot,
+        workspace: input.workspace,
+      })
+    } catch (err) {
+      await Promise.allSettled([
+        services.projects.archive(project.id),
+        configRoot
+          ? rm(configRoot, { recursive: true, force: true })
+          : Promise.resolve(),
+      ])
+      throw err
+    }
+  }
+
+  private async services(): Promise<LoreServices> {
+    if (!this.servicesPromise) {
+      const configuredRoot = process.env["LORE_EVAL_LONGITUDINAL_CONFIG_ROOT"]
+      if (configuredRoot) {
+        const prior = process.env["LORE_CONFIG_ROOT"]
+        process.env["LORE_CONFIG_ROOT"] = configuredRoot
+        this.servicesPromise = initServices(undefined, { driftCheck: false }).finally(
+          () => {
+            if (prior === undefined) delete process.env["LORE_CONFIG_ROOT"]
+            else process.env["LORE_CONFIG_ROOT"] = prior
+          }
+        )
+      } else {
+        this.servicesPromise = initServices(undefined, { driftCheck: false })
+      }
+    }
+    return this.servicesPromise
+  }
+}
+
+class LiveLongitudinalLoreRun implements LongitudinalLoreRun {
+  readonly projectId: string
+  readonly projectName: string
+
+  constructor(
+    private readonly input: {
+      services: LoreServices
+      project: Project
+      configRoot: string
+      workspace: string
+    }
+  ) {
+    this.projectId = input.project.id
+    this.projectName = input.project.name
+  }
+
+  async formContext(input: {
+    scenario: LongitudinalTaskScenario
+    transcript: string
+    workspace: string
+    sessionId: string
+  }): Promise<LongitudinalLoreFormationResult> {
+    const before = await snapshotProjectContext(this.input.services, this.projectId)
+    const hooks = mergeHookDefaults(this.input.services.config.hooks, this.projectName, [])
+    const mining = await withTemporaryLongitudinalAgentConfig(
+      {
+        workspace: input.workspace,
+        configRoot: this.input.configRoot,
+        services: this.input.services,
+      },
+      () =>
+        withTemporaryEnv(
+          {
+            LORE_CONFIG_ROOT: this.input.configRoot,
+            LORE_AGENT_NAME: process.env["LORE_AGENT_NAME"] ?? "Codex",
+          },
+          () =>
+            runConversationMining(input.transcript, {
+              cwd: input.workspace,
+              subProjects: [],
+              catchAllName: this.projectName,
+              sessionId: input.sessionId,
+              agentName: "Codex",
+              authSource: this.input.services.authSource,
+              agent: hooks.backgroundAgent,
+            })
+        )
+    )
+    const after = await snapshotProjectContext(this.input.services, this.projectId)
+    const delta = diffProjectContextSnapshots(before, after)
+    const expectedContextIds = selectExpectedContextIds(
+      input.scenario.expectedContext.keywords,
+      delta.contexts
+    )
+    return {
+      projectId: this.projectId,
+      projectName: this.projectName,
+      mining,
+      memoriesCreated: delta.memoriesCreated,
+      factsCreated: delta.factsCreated,
+      decisionsCreated: delta.decisionsCreated,
+      tasksCreated: delta.tasksCreated,
+      createdContextIds: delta.contexts.map((context) => context.id),
+      expectedContextIds,
+    }
+  }
+
+  async loadContext(input: {
+    scenario: LongitudinalTaskScenario
+    phaseBPrompt: string
+    expectedContextIds: string[]
+  }): Promise<LongitudinalWakeUpResult> {
+    const data = await loadWakeUpData(this.input.services, {
+      projectId: this.projectId,
+      userQuery: input.phaseBPrompt,
+      includeMemoryContent: true,
+      includeCoverage: true,
+    })
+    return wakeUpDataToLongitudinalResult(data, input.scenario)
+  }
+
+  async cleanup(): Promise<void> {
+    await this.input.services.projects.archive(this.projectId)
+    await rm(this.input.configRoot, { recursive: true, force: true })
+  }
+}
+
+const LONGITUDINAL_SANDBOX_NAME_MARKERS =
+  /\b(?:sandbox|eval|test|scratch|staging|dev|playground)\b/i
+
+export type LongitudinalAgentConfigServices = Pick<
+  LoreServices,
+  "authSource" | "config"
+>
+
+function assertLongitudinalSandboxProjectName(projectName: string): void {
+  if (LONGITUDINAL_SANDBOX_NAME_MARKERS.test(projectName)) return
+  const allowProd = process.env["LORE_EVAL_NOTION_ALLOW_PRODUCTION"]
+  if (allowProd === "1" || allowProd === "true") return
+  throw new Error(
+    `Project "${projectName}" does not look like a sandbox (no word-bounded match for sandbox/eval/test/scratch/staging/dev/playground). ` +
+      `Set LORE_EVAL_NOTION_ALLOW_PRODUCTION=1 to confirm pointing longitudinal task evals at this project on purpose.`
+  )
+}
+
+async function writeLongitudinalConfigRoot(input: {
+  configRoot: string
+  services: LoreServices
+  projectName: string
+}): Promise<void> {
+  const auth =
+    input.services.config.auth &&
+    (input.services.config.auth.workspaceId || input.services.config.auth.baseUrl)
+      ? {
+          workspaceId: input.services.config.auth.workspaceId,
+          baseUrl: input.services.config.auth.baseUrl,
+        }
+      : undefined
+  const config = {
+    vault: { pageId: input.services.config.vault.pageId },
+    ...(auth ? { auth } : {}),
+    projects: [{ name: input.projectName, path: "." }],
+    hooks: input.services.config.hooks ?? {},
+  }
+  await writeFile(join(input.configRoot, ".lore.yaml"), stringifyYaml(config), {
+    mode: 0o600,
+  })
+}
+
+async function writeLongitudinalAgentConfig(input: {
+  workspace: string
+  configRoot: string
+  services: LongitudinalAgentConfigServices
+}): Promise<void> {
+  const mcpCommand = await resolveMcpCommand()
+  const mcpEnv = buildLongitudinalMcpEnv(input.configRoot, input.services.authSource)
+  await mkdir(join(input.workspace, ".codex"), { recursive: true, mode: 0o700 })
+  await writeFile(
+    join(input.workspace, ".codex", "config.toml"),
+    renderCodexMcpConfig({ command: mcpCommand.command, args: mcpCommand.args, env: mcpEnv }),
+    { mode: 0o600 }
+  )
+  await writeFile(
+    join(input.workspace, ".mcp.json"),
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          lore: {
+            command: mcpCommand.command,
+            args: mcpCommand.args,
+            env: mcpEnv,
+          },
+        },
+      },
+      null,
+      2
+    )}\n`,
+    { mode: 0o600 }
+  )
+}
+
+async function removeLongitudinalAgentConfig(workspace: string): Promise<void> {
+  await Promise.all([
+    rm(join(workspace, ".codex", "config.toml"), { force: true }),
+    rm(join(workspace, ".mcp.json"), { force: true }),
+  ])
+}
+
+export async function withTemporaryLongitudinalAgentConfig<T>(
+  input: {
+    workspace: string
+    configRoot: string
+    services: LongitudinalAgentConfigServices
+  },
+  fn: () => Promise<T>
+): Promise<T> {
+  try {
+    await writeLongitudinalAgentConfig(input)
+    return await fn()
+  } finally {
+    await removeLongitudinalAgentConfig(input.workspace)
+  }
+}
+
+async function resolveMcpCommand(): Promise<{ command: string; args: string[] }> {
+  const distMcp = resolve(dirname(fileURLToPath(import.meta.url)), "..", "mcp.js")
+  try {
+    await stat(distMcp)
+    return { command: "node", args: [distMcp] }
+  } catch {
+    return { command: "lore", args: ["mcp"] }
+  }
+}
+
+function buildLongitudinalMcpEnv(
+  configRoot: string,
+  authSource: AuthSource
+): Record<string, string> {
+  const env: Record<string, string> = {
+    LORE_CONFIG_ROOT: configRoot,
+    LORE_SUPPRESS_DEPRECATIONS: "1",
+    LORE_BACKGROUND_AGENT: "true",
+  }
+  for (const key of [
+    "PATH",
+    "HOME",
+    "NOTION_API_TOKEN",
+    "LORE_NOTION_TOKEN",
+    "LORE_NOTION_BASE_URL",
+    "NOTION_WORKSPACE_ID",
+    "NOTION_ENV",
+    "NOTION_BASE_URL",
+    "NOTION_API_BASE_URL",
+    "LORE_USER_NAME",
+  ]) {
+    if (
+      authSource === "ntn-auth-json" &&
+      (key === "NOTION_API_TOKEN" || key === "LORE_NOTION_TOKEN")
+    ) {
+      continue
+    }
+    const value = process.env[key]
+    if (typeof value === "string" && value.length > 0) env[key] = value
+  }
+  return env
+}
+
+function renderCodexMcpConfig(input: {
+  command: string
+  args: string[]
+  env: Record<string, string>
+}): string {
+  const lines = [
+    "[mcp_servers.lore]",
+    'transport = "stdio"',
+    `command = "${tomlEscape(input.command)}"`,
+    `args = [${input.args.map((arg) => `"${tomlEscape(arg)}"`).join(", ")}]`,
+    "",
+    "[mcp_servers.lore.env]",
+  ]
+  for (const [key, value] of Object.entries(input.env).sort(([a], [b]) =>
+    a.localeCompare(b)
+  )) {
+    lines.push(`${key} = "${tomlEscape(value)}"`)
+  }
+  lines.push("")
+  return lines.join("\n")
+}
+
+function tomlEscape(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+}
+
+async function withTemporaryEnv<T>(
+  overrides: Record<string, string | undefined>,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prior = new Map<string, string | undefined>()
+  for (const [key, value] of Object.entries(overrides)) {
+    prior.set(key, process.env[key])
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  try {
+    return await fn()
+  } finally {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+interface ProjectContextSnapshot {
+  memoryContexts: ProjectContextItem[]
+  factContexts: ProjectContextItem[]
+}
+
+interface ProjectContextItem {
+  id: string
+  kind: Memory["kind"] | "fact"
+  text: string
+}
+
+async function snapshotProjectContext(
+  services: LoreServices,
+  projectId: string
+): Promise<ProjectContextSnapshot> {
+  const memoryContexts: ProjectContextItem[] = []
+  for await (const memory of services.memories.listAllForBackfill({ projectId })) {
+    memoryContexts.push(memoryToContextItem(memory))
+  }
+  const factContexts: ProjectContextItem[] = []
+  for await (const fact of services.facts.listAllForBackfill({ projectId })) {
+    factContexts.push(factToContextItem(fact))
+  }
+  return { memoryContexts, factContexts }
+}
+
+function diffProjectContextSnapshots(
+  before: ProjectContextSnapshot,
+  after: ProjectContextSnapshot
+): {
+  memoriesCreated: number
+  factsCreated: number
+  decisionsCreated: number
+  tasksCreated: number
+  contexts: ProjectContextItem[]
+} {
+  const beforeIds = new Set([
+    ...before.memoryContexts.map((item) => item.id),
+    ...before.factContexts.map((item) => item.id),
+  ])
+  const contexts = [...after.memoryContexts, ...after.factContexts].filter(
+    (item) => !beforeIds.has(item.id)
+  )
+  return {
+    memoriesCreated: contexts.filter(
+      (item) => item.kind !== "decision" && item.kind !== "task" && item.kind !== "fact"
+    ).length,
+    factsCreated: contexts.filter((item) => item.kind === "fact").length,
+    decisionsCreated: contexts.filter((item) => item.kind === "decision").length,
+    tasksCreated: contexts.filter((item) => item.kind === "task").length,
+    contexts,
+  }
+}
+
+function selectExpectedContextIds(
+  keywords: string[],
+  contexts: ProjectContextItem[]
+): string[] {
+  if (keywords.length === 0) {
+    return contexts
+      .filter((context) => context.kind !== "fact")
+      .map((context) => context.id)
+  }
+  const normalized = keywords.map((keyword) => keyword.toLocaleLowerCase())
+  return contexts
+    .filter((context) => {
+      const text = context.text.toLocaleLowerCase()
+      return normalized.every((keyword) => text.includes(keyword))
+    })
+    .map((context) => context.id)
+}
+
+function wakeUpDataToLongitudinalResult(
+  data: WakeUpData,
+  scenario: LongitudinalTaskScenario
+): LongitudinalWakeUpResult {
+  const contexts = wakeUpDataToContextItems(data)
+  const surfacedContextIds = contexts.map((context) => context.id)
+  const harmfulKeywords = scenario.expectedContext.harmfulKeywords.map((keyword) =>
+    keyword.toLocaleLowerCase()
+  )
+  const harmfulContextIds =
+    harmfulKeywords.length === 0
+      ? []
+      : contexts
+          .filter((context) => {
+            const text = context.text.toLocaleLowerCase()
+            return harmfulKeywords.some((keyword) => text.includes(keyword))
+          })
+          .map((context) => context.id)
+  return {
+    renderedContext: renderLongitudinalWakeUpContext(contexts),
+    surfacedContextIds,
+    harmfulContextIds,
+    failureMessage: null,
+  }
+}
+
+function wakeUpDataToContextItems(data: WakeUpData): ProjectContextItem[] {
+  const items: ProjectContextItem[] = []
+  const add = (item: ProjectContextItem | null | undefined) => {
+    if (!item) return
+    if (items.some((existing) => existing.id === item.id)) return
+    items.push(item)
+  }
+  add(data.digest ? memoryToContextItem(data.digest) : null)
+  for (const memory of data.taskMemories) add(memoryToContextItem(memory))
+  for (const memory of data.memories) add(memoryToContextItem(memory))
+  for (const memory of data.relatedMemories) add(memoryToContextItem(memory))
+  for (const memory of data.proposedMemories) add(memoryToContextItem(memory))
+  for (const memory of data.staleConfidence) add(memoryToContextItem(memory))
+  for (const memory of data.pinnedBlocks) add(memoryToContextItem(memory))
+  for (const section of data.inheritedMemories) {
+    for (const memory of section.memories) add(memoryToContextItem(memory))
+  }
+  for (const decision of data.proposedDecisions) add(memoryToContextItem(decision))
+  for (const decision of data.overdueDecisions) add(memoryToContextItem(decision))
+  for (const task of data.tasks) add(memoryToContextItem(task))
+  for (const fact of data.knowledgeFacts) add(factToContextItem(fact))
+  return items
+}
+
+function memoryToContextItem(
+  memory: Omit<Memory, "content"> & { content?: string }
+): ProjectContextItem {
+  return {
+    id: memory.id,
+    kind: memory.kind,
+    text: [
+      memory.kind,
+      memory.title,
+      memory.synopsis,
+      memory.keywords,
+      memory.entity,
+      memory.content ?? "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  }
+}
+
+function factToContextItem(fact: Fact): ProjectContextItem {
+  return {
+    id: fact.id,
+    kind: "fact",
+    text: ["fact", fact.subject, fact.predicate, fact.object].join(" "),
+  }
+}
+
+function renderLongitudinalWakeUpContext(contexts: ProjectContextItem[]): string {
+  if (contexts.length === 0) return ""
+  const lines: string[] = []
+  for (const context of contexts) {
+    const preview = context.text.replace(/\s+/g, " ").trim().slice(0, 1_000)
+    lines.push(`- [${context.kind}] ${context.id}: ${preview}`)
+  }
+  return lines.join("\n")
 }
 
 /**

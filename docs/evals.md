@@ -369,6 +369,93 @@ shells out to `codex exec --cd <workspace> --sandbox workspace-write
 --skip-git-repo-check <prompt>`, then runs the verifiers against the
 result.
 
+### Longitudinal task suites
+
+Longitudinal task suites are a phase-aware variant of `--runner task`:
+
+```yaml
+version: 1
+runner: task
+longitudinal: true
+name: lore-longitudinal-minimal
+conditions: [no-memory, lore-full-loop]
+scenarios:
+  - id: decision-continuity-result-boundary
+    workspace: ../longitudinal/workspaces/result-boundary
+    phaseA:
+      prompt: Add `createUserProfile(input)` and capture the service-boundary decision.
+    phaseB:
+      prompt: Add `fetchUserProfile(userId)` consistently with the previous decision.
+    expectedContext:
+      keywords: ["Result", "ok", "err"]
+    verifiers:
+      - type: command
+        command: npm
+        args: ["test"]
+```
+
+The committed MVP suite lives at
+`evals/task-suites/longitudinal.yaml` and contains exactly the three
+Phase 1 scenarios from the benchmark-path decision:
+
+- `decision-continuity-result-boundary`
+- `failed-attempt-avoidance-esm-imports`
+- `follow-up-task-json-output`
+
+Each scenario runs Phase A and Phase B in the same copied workspace, but each
+phase is a fresh agent process. Under `no-memory`, the runner does not write
+`.lore.yaml`, does not seed memory, does not run hook formation, and injects no
+wake-up context. Under `lore-full-loop`, the runner mines the Phase A
+conversation through `runConversationMining`, then calls `loadWakeUpData({
+projectId, userQuery: phaseBPrompt, includeMemoryContent: true })` before Phase
+B and injects the rendered wake-up bundle into the Phase B prompt.
+
+The JSON artifact records each condition run with `phases[]`, prompt ids,
+workspace source, verifier results, patch stats, elapsed time, Lore counts,
+expected context ids, surfaced context ids, harmful context ids, and cost fields
+when the adapter reports them. The summary reports pass rate per condition and a
+`lore-full-loop - no-memory` success-rate delta, plus the scenario ids where
+Lore lifted or harmed the outcome. Positive lift is useful evidence, but it is
+not a validity gate: a no-lift or harmful result means the harness found
+outcome data to inspect, not that the harness failed. The CLI exits non-zero
+when `lore-full-loop` has failing trials; `no-memory` baseline failures alone
+remain lift data.
+
+Run the dry path with mock adapters in unit tests:
+
+```bash
+npm run test -- src/eval/task-runner.test.ts
+```
+
+Run the committed suite with real agents only when you intentionally opt into
+model spend:
+
+```bash
+npm run build
+LORE_EVAL_TASK_REAL=1 \
+node dist/cli.js eval run --runner task evals/task-suites/longitudinal.yaml
+```
+
+Run the live `lore-full-loop` condition only against a sandbox/eval/test
+project. The runner creates a per-run project, writes `.lore.yaml` only in a
+temporary config root, writes temporary agent MCP config inside the copied
+workspace, archives the per-run project in cleanup, and removes the temporary
+config root:
+
+```bash
+npm run build
+LORE_EVAL_TASK_REAL=1 \
+LORE_EVAL_LONGITUDINAL_REAL=1 \
+LORE_EVAL_LONGITUDINAL_SANDBOX_PROJECT="Eval Sandbox" \
+node dist/cli.js eval run --runner task evals/task-suites/longitudinal.yaml
+```
+
+If the source checkout does not have a usable `.lore.yaml`, point
+`LORE_EVAL_LONGITUDINAL_CONFIG_ROOT` at a sandbox-vault config root. Sandbox
+names must contain a word-bounded `sandbox`, `eval`, `test`, `scratch`,
+`staging`, `dev`, or `playground` marker unless
+`LORE_EVAL_NOTION_ALLOW_PRODUCTION=1` is set.
+
 ### Production safety gates
 
 - **Cost guardrail.** Real Codex invocation requires

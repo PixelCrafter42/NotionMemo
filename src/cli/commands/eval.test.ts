@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
   assertSandboxProjectName,
   collectEvalThresholdFailures,
+  hasLongitudinalTaskGateFailures,
   parseEvalRunCliOptions,
   validateBaselineRunnerSupport,
+  validateEvalRunRunnerCompatibility,
 } from "./eval.js"
 import type { EvalRunArtifact } from "../../eval/runner.js"
+import type { LongitudinalTaskArtifact } from "../../eval/task-runner.js"
 
 describe("parseEvalRunCliOptions", () => {
   it("leaves runner undefined when --runner is not passed (suite YAML wins)", () => {
@@ -75,6 +78,27 @@ describe("parseEvalRunCliOptions", () => {
       expect(result.message).toContain("not supported with --runner task")
     }
   })
+
+  it.each([
+    { flag: "baseline", value: "evals/baselines/x.json" },
+    { flag: "minLift", value: "0.5" },
+    { flag: "maxHarm", value: "0" },
+    { flag: "project", value: "Widget" },
+  ])(
+    "rejects --$flag after peeking a YAML-declared task suite",
+    ({ flag, value }) => {
+      const parsed = parseEvalRunCliOptions({ [flag]: value })
+      expect(parsed.ok).toBe(true)
+
+      const result = validateEvalRunRunnerCompatibility("task", {
+        [flag]: value,
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.message).toContain("not supported with --runner task")
+      }
+    }
+  )
 
   it("requires --project when --runner notion is set", () => {
     const result = parseEvalRunCliOptions({ runner: "notion" })
@@ -174,6 +198,47 @@ describe("collectEvalThresholdFailures", () => {
   })
 })
 
+describe("hasLongitudinalTaskGateFailures", () => {
+  it("does not fail the gate for no-memory baseline failures", () => {
+    expect(
+      hasLongitudinalTaskGateFailures(
+        longitudinalArtifact({
+          noMemory: { trials: 1, passed: 0, failed: 1 },
+          fullLoop: { trials: 1, passed: 1, failed: 0 },
+          passedTrials: 1,
+          failedTrials: 1,
+        })
+      )
+    ).toBe(false)
+  })
+
+  it("fails the gate when lore-full-loop fails", () => {
+    expect(
+      hasLongitudinalTaskGateFailures(
+        longitudinalArtifact({
+          noMemory: { trials: 1, passed: 1, failed: 0 },
+          fullLoop: { trials: 1, passed: 0, failed: 1 },
+          passedTrials: 1,
+          failedTrials: 1,
+        })
+      )
+    ).toBe(true)
+  })
+
+  it("falls back to total failed trials when no full-loop condition ran", () => {
+    expect(
+      hasLongitudinalTaskGateFailures(
+        longitudinalArtifact({
+          noMemory: { trials: 1, passed: 0, failed: 1 },
+          fullLoop: { trials: 0, passed: 0, failed: 0 },
+          passedTrials: 0,
+          failedTrials: 1,
+        })
+      )
+    ).toBe(true)
+  })
+})
+
 describe("validateBaselineRunnerSupport", () => {
   it("rejects --runner task with an actionable operator message", () => {
     const result = validateBaselineRunnerSupport("task")
@@ -217,6 +282,52 @@ function evalArtifact(input: {
         averagePrecision: null,
         memoryLift: input.memoryLift,
         memoryHarm: input.memoryHarm,
+      },
+    },
+  }
+}
+
+function longitudinalArtifact(input: {
+  noMemory: { trials: number; passed: number; failed: number }
+  fullLoop: { trials: number; passed: number; failed: number }
+  passedTrials: number
+  failedTrials: number
+}): LongitudinalTaskArtifact {
+  return {
+    suite: "longitudinal-test",
+    description: "",
+    startedAt: "2026-05-03T12:00:00.000Z",
+    runner: { mode: "task", kind: "longitudinal" },
+    results: [],
+    summary: {
+      tasks: 1,
+      passedTasks: 0,
+      failedTasks: 1,
+      totalTrials: input.passedTrials + input.failedTrials,
+      passedTrials: input.passedTrials,
+      failedTrials: input.failedTrials,
+      conditions: {
+        "no-memory": {
+          ...input.noMemory,
+          successRate:
+            input.noMemory.trials === 0
+              ? 0
+              : input.noMemory.passed / input.noMemory.trials,
+        },
+        "lore-full-loop": {
+          ...input.fullLoop,
+          successRate:
+            input.fullLoop.trials === 0
+              ? 0
+              : input.fullLoop.passed / input.fullLoop.trials,
+        },
+      },
+      lift: {
+        fromCondition: "no-memory",
+        toCondition: "lore-full-loop",
+        successRateDelta: null,
+        liftedScenarioIds: [],
+        harmedScenarioIds: [],
       },
     },
   }

@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, writeFile, readFile, stat } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -8,8 +9,13 @@ import {
   buildBenchSpawnArgs,
   buildCodexChildEnv,
   CODEX_FORWARDED_ENV_KEYS,
+  isLongitudinalTaskArtifact,
+  LongitudinalAdapterRefusedError,
+  type LongitudinalAgentConfigServices,
+  type LongitudinalLoreAdapter,
   runTaskEvalSuite,
   taskEvalSuiteSchema,
+  withTemporaryLongitudinalAgentConfig,
   type AgentAdapter,
   type AgentRunInput,
   type AgentRunResult,
@@ -222,6 +228,9 @@ tasks:
     })
 
     expect(artifact.summary.failedTrials).toBe(1)
+    if (isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected standard artifact")
+    }
     expect(artifact.results[0]!.agentRun.exitCode).toBe(1)
     expect(artifact.results[0]!.success).toBe(false)
     expect(artifact.results[0]!.failureReason).toBe("agent-exit")
@@ -498,6 +507,570 @@ tasks:
 
     expect(observedSeed).toBe('{"hint": "use Result types"}')
     expect(artifact.results[0]!.memoryCondition).toBe("helpful")
+  })
+
+  it("runs command verifiers inside the copied workspace", async () => {
+    const { suitePath } = await writeTaskSuite({
+      workspace: { "package.json": '{"name": "x"}\n' },
+      suite: `version: 1
+name: command-verifier
+tasks:
+  - id: command-checks-agent-output
+    prompt: Write ok.txt.
+    agent: codex
+    workspace: ../workspaces/x
+    verifiers:
+      - type: command
+        command: node
+        args:
+          - -e
+          - require('node:fs').accessSync('ok.txt')
+`,
+    })
+
+    const adapter = mockAdapter("codex", async ({ workspace }) => {
+      await writeFile(join(workspace, "ok.txt"), "ok\n", "utf-8")
+      return successResult()
+    })
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+    })
+
+    expect(artifact.summary.failedTrials).toBe(0)
+    expect(artifact.results[0]!.verifiers[0]!.message).toContain(
+      "Command passed"
+    )
+  })
+
+  it("runs longitudinal suites across no-memory and lore-full-loop conditions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-eval-longitudinal-suite-"))
+    const suitesDir = join(dir, "task-suites")
+    const workspaceDir = join(dir, "workspaces", "result-boundary")
+    await mkdir(suitesDir, { recursive: true })
+    await mkdir(workspaceDir, { recursive: true })
+    await writeFile(
+      join(workspaceDir, "profile-service.js"),
+      "export function ok(value) { return { ok: true, value } }\n" +
+        "export function err(error) { return { ok: false, error } }\n",
+      "utf-8"
+    )
+    const suitePath = join(suitesDir, "longitudinal.yaml")
+    await writeFile(
+      suitePath,
+      `version: 1
+runner: task
+longitudinal: true
+name: longitudinal-smoke
+conditions:
+  - no-memory
+  - lore-full-loop
+scenarios:
+  - id: result-boundary
+    agent: codex
+    workspace: ../workspaces/result-boundary
+    phaseA:
+      prompt: Add createUserProfile using Result helpers.
+    phaseB:
+      prompt: Add fetchUserProfile consistently with the previous decision.
+    expectedContext:
+      description: Service boundaries use Result helpers.
+      keywords: ["Result", "ok", "err"]
+    verifiers:
+      - type: file-contents-match
+        path: profile-service.js
+        pattern: 'export\\s+function\\s+fetchUserProfile'
+      - type: file-contents-match
+        path: profile-service.js
+        pattern: 'return\\s+(?:ok|err)\\('
+`,
+      "utf-8"
+    )
+
+    const adapter = mockAdapter("codex", async ({ prompt, workspace }) => {
+      const servicePath = join(workspace, "profile-service.js")
+      if (prompt.includes("createUserProfile")) {
+        await writeFile(
+          servicePath,
+          (await readFile(servicePath, "utf-8")) +
+            "\nexport function createUserProfile(input) {\n" +
+            "  if (!input || !input.name) return err('missing name')\n" +
+            "  return ok({ id: 'u1', name: input.name })\n" +
+            "}\n",
+          "utf-8"
+        )
+      }
+      if (prompt.includes("Retrieved Lore context")) {
+        await writeFile(
+          servicePath,
+          (await readFile(servicePath, "utf-8")) +
+            "\nexport function fetchUserProfile(userId) {\n" +
+            "  if (!userId) return err('missing userId')\n" +
+            "  return ok({ id: userId, name: 'Ada' })\n" +
+            "}\n",
+          "utf-8"
+        )
+      }
+      return successResult()
+    })
+
+    let cleanupCalls = 0
+    const loreAdapter: LongitudinalLoreAdapter = {
+      async createRun({ workspace }) {
+        await mkdir(join(workspace, ".codex"), { recursive: true })
+        await writeFile(join(workspace, ".mcp.json"), "{}\n", "utf-8")
+        await writeFile(join(workspace, ".lore.yaml"), "vault:\n  pageId: test\n", "utf-8")
+        await writeFile(
+          join(workspace, ".codex", "config.toml"),
+          "[mcp_servers.lore]\n",
+          "utf-8"
+        )
+        return {
+          projectId: "project-1",
+          projectName: "Eval Sandbox/result-boundary",
+          async formContext() {
+            return {
+              projectId: "project-1",
+              projectName: "Eval Sandbox/result-boundary",
+              mining: null,
+              memoriesCreated: 0,
+              factsCreated: 0,
+              decisionsCreated: 1,
+              tasksCreated: 0,
+              createdContextIds: ["ctx-result"],
+              expectedContextIds: ["ctx-result"],
+            }
+          },
+          async loadContext() {
+            return {
+              renderedContext:
+                "- [decision] ctx-result: Service boundaries return Result values with ok and err helpers.",
+              surfacedContextIds: ["ctx-result"],
+              harmfulContextIds: [],
+              failureMessage: null,
+            }
+          },
+          async cleanup() {
+            cleanupCalls += 1
+          },
+        }
+      },
+    }
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+      longitudinalLoreAdapter: loreAdapter,
+    })
+
+    expect(cleanupCalls).toBe(1)
+    expect(artifact.runner).toMatchObject({ mode: "task", kind: "longitudinal" })
+    if (!isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected longitudinal artifact")
+    }
+    expect(artifact.summary.conditions["no-memory"]).toMatchObject({
+      trials: 1,
+      passed: 0,
+      failed: 1,
+    })
+    expect(artifact.summary.conditions["lore-full-loop"]).toMatchObject({
+      trials: 1,
+      passed: 1,
+      failed: 0,
+    })
+    expect(artifact.summary.lift).toMatchObject({
+      successRateDelta: 1,
+      liftedScenarioIds: ["result-boundary"],
+      harmedScenarioIds: [],
+    })
+    const fullLoop = artifact.results.find(
+      (result) =>
+        result.scenarioId === "result-boundary" &&
+        result.condition === "lore-full-loop"
+    )
+    expect(fullLoop?.phases[0]?.lore.decisionsCreated).toBe(1)
+    expect(fullLoop?.phases[1]?.lore.surfacedContextIds).toEqual(["ctx-result"])
+    expect(fullLoop?.phases[1]?.patchStats.filesChanged).toBe(1)
+  })
+
+  it("keeps primary longitudinal agents Lore-tool-free while mining has MCP config", async () => {
+    const { suitePath } = await writeTaskSuite({
+      workspace: { "status.js": "export function status() { return 'ok' }\n" },
+      suite: `version: 1
+runner: task
+longitudinal: true
+name: longitudinal-tool-free-primary
+conditions:
+  - lore-full-loop
+scenarios:
+  - id: tool-free-primary
+    agent: codex
+    workspace: ../workspaces/x
+    phaseA:
+      prompt: Inspect the status helper.
+    phaseB:
+      prompt: Add completeStatus using the remembered convention.
+    expectedContext:
+      keywords: ["completeStatus"]
+    verifiers:
+      - type: file-contents-match
+        path: status.js
+        pattern: 'export\\s+function\\s+completeStatus'
+`,
+    })
+
+    const agentProbes: Array<{ codexConfig: boolean; mcpJson: boolean }> = []
+    const adapter = mockAdapter("codex", async ({ workspace }) => {
+      agentProbes.push({
+        codexConfig: existsSync(join(workspace, ".codex", "config.toml")),
+        mcpJson: existsSync(join(workspace, ".mcp.json")),
+      })
+      if (agentProbes.length === 2) {
+        await writeFile(
+          join(workspace, "status.js"),
+          "export function status() { return 'ok' }\n" +
+            "export function completeStatus() { return 'done' }\n",
+          "utf-8"
+        )
+      }
+      return successResult()
+    })
+
+    const configRoot = await mkdtemp(join(tmpdir(), "lore-eval-config-"))
+    const services = {
+      authSource: "env-notion-api-token",
+      config: { vault: { pageId: "vault-page" }, hooks: {} },
+    } as unknown as LongitudinalAgentConfigServices
+    let miningSawConfig = false
+    let cleanupCalls = 0
+    const loreAdapter: LongitudinalLoreAdapter = {
+      async createRun({ workspace }) {
+        await mkdir(join(workspace, ".codex"), { recursive: true })
+        await writeFile(
+          join(workspace, ".codex", "config.toml"),
+          "[mcp_servers.lore]\n",
+          "utf-8"
+        )
+        await writeFile(join(workspace, ".mcp.json"), "{}\n", "utf-8")
+        return {
+          projectId: "project-1",
+          projectName: "Eval Sandbox/tool-free-primary",
+          async formContext({ workspace: phaseWorkspace }) {
+            await withTemporaryLongitudinalAgentConfig(
+              { workspace: phaseWorkspace, configRoot, services },
+              async () => {
+                miningSawConfig =
+                  existsSync(join(phaseWorkspace, ".codex", "config.toml")) &&
+                  existsSync(join(phaseWorkspace, ".mcp.json"))
+                expect(
+                  await readFile(
+                    join(phaseWorkspace, ".codex", "config.toml"),
+                    "utf-8"
+                  )
+                ).toContain("mcp_servers.lore")
+              }
+            )
+            return {
+              projectId: "project-1",
+              projectName: "Eval Sandbox/tool-free-primary",
+              mining: null,
+              memoriesCreated: 1,
+              factsCreated: 0,
+              decisionsCreated: 0,
+              tasksCreated: 0,
+              createdContextIds: ["ctx-complete"],
+              expectedContextIds: ["ctx-complete"],
+            }
+          },
+          async loadContext() {
+            return {
+              renderedContext:
+                "- [memory] ctx-complete: Add completeStatus for status completion.",
+              surfacedContextIds: ["ctx-complete"],
+              harmfulContextIds: [],
+              failureMessage: null,
+            }
+          },
+          async cleanup() {
+            cleanupCalls += 1
+            await rm(configRoot, { recursive: true, force: true })
+          },
+        }
+      },
+    }
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+      longitudinalLoreAdapter: loreAdapter,
+    })
+
+    expect(cleanupCalls).toBe(1)
+    expect(miningSawConfig).toBe(true)
+    expect(agentProbes).toEqual([
+      { codexConfig: false, mcpJson: false },
+      { codexConfig: false, mcpJson: false },
+    ])
+    if (!isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected longitudinal artifact")
+    }
+    expect(artifact.results[0]).toMatchObject({
+      success: true,
+      failureReason: null,
+    })
+  })
+
+  it("records wake-up load failures as lore-full-loop phase failures", async () => {
+    const { suitePath } = await writeTaskSuite({
+      workspace: { "status.js": "export function status() { return 'ok' }\n" },
+      suite: `version: 1
+runner: task
+longitudinal: true
+name: longitudinal-wakeup-failure
+conditions:
+  - lore-full-loop
+scenarios:
+  - id: wakeup-fails-without-keywords
+    agent: codex
+    workspace: ../workspaces/x
+    phaseA:
+      prompt: Inspect the status helper and remember anything useful.
+    phaseB:
+      prompt: Continue the status helper using the prior session context.
+    expectedContext:
+      description: No expected keywords are required for this regression.
+    verifiers:
+      - type: file-contents-match
+        path: status.js
+        pattern: status
+`,
+    })
+
+    let agentRuns = 0
+    const adapter = mockAdapter("codex", async () => {
+      agentRuns += 1
+      return successResult()
+    })
+    const loreAdapter: LongitudinalLoreAdapter = {
+      async createRun() {
+        return {
+          projectId: "project-1",
+          projectName: "Eval Sandbox/wakeup-failure",
+          async formContext() {
+            return {
+              projectId: "project-1",
+              projectName: "Eval Sandbox/wakeup-failure",
+              mining: null,
+              memoriesCreated: 1,
+              factsCreated: 0,
+              decisionsCreated: 0,
+              tasksCreated: 0,
+              createdContextIds: ["ctx-any"],
+              expectedContextIds: [],
+            }
+          },
+          async loadContext() {
+            throw new Error("wake-up prefetch exploded")
+          },
+          async cleanup() {},
+        }
+      },
+    }
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+      longitudinalLoreAdapter: loreAdapter,
+    })
+
+    expect(agentRuns).toBe(1)
+    if (!isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected longitudinal artifact")
+    }
+    expect(artifact.summary.conditions["lore-full-loop"]).toMatchObject({
+      trials: 1,
+      passed: 0,
+      failed: 1,
+    })
+    const result = artifact.results[0]!
+    expect(result.success).toBe(false)
+    expect(result.failureReason).toBe("wake-up")
+    expect(result.agentRun).toBeNull()
+    const usePhase = result.phases.find((phase) => phase.phase === "use")
+    expect(usePhase).toMatchObject({
+      success: false,
+      agentRun: null,
+      verifierResults: [],
+      failureReason: "wake-up",
+    })
+    expect(usePhase?.failureMessage).toContain("wake-up prefetch exploded")
+  })
+
+  it("does not form or load Lore context after Phase A agent refusal", async () => {
+    const { suitePath } = await writeTaskSuite({
+      workspace: { "status.js": "export function status() { return 'ok' }\n" },
+      suite: `version: 1
+runner: task
+longitudinal: true
+name: longitudinal-phase-a-refusal
+conditions:
+  - lore-full-loop
+scenarios:
+  - id: phase-a-refusal
+    agent: codex
+    workspace: ../workspaces/x
+    phaseA:
+      prompt: Inspect the status helper.
+    phaseB:
+      prompt: Continue the status helper.
+    verifiers:
+      - type: file-contents-match
+        path: status.js
+        pattern: status
+`,
+    })
+
+    let agentRuns = 0
+    const adapter = mockAdapter("codex", async () => {
+      agentRuns += 1
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "adapter refused",
+        timedOut: false,
+        refused: true,
+      }
+    })
+    let formContextCalls = 0
+    let loadContextCalls = 0
+    const loreAdapter: LongitudinalLoreAdapter = {
+      async createRun() {
+        return {
+          projectId: "project-1",
+          projectName: "Eval Sandbox/phase-a-refusal",
+          async formContext() {
+            formContextCalls += 1
+            throw new Error("formContext should not run")
+          },
+          async loadContext() {
+            loadContextCalls += 1
+            throw new Error("loadContext should not run")
+          },
+          async cleanup() {},
+        }
+      },
+    }
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+      longitudinalLoreAdapter: loreAdapter,
+    })
+
+    if (!isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected longitudinal artifact")
+    }
+    expect(agentRuns).toBe(1)
+    expect(formContextCalls).toBe(0)
+    expect(loadContextCalls).toBe(0)
+    expect(artifact.results[0]!.success).toBe(false)
+    expect(artifact.results[0]!.failureReason).toBe("adapter-refused")
+    expect(artifact.results[0]!.phases[0]).toMatchObject({
+      phase: "formation",
+      success: false,
+      failureReason: "adapter-refused",
+    })
+    expect(artifact.results[0]!.phases[1]).toMatchObject({
+      phase: "use",
+      success: false,
+      agentRun: null,
+      verifierResults: [],
+      failureReason: "adapter-refused",
+    })
+    expect(artifact.results[0]!.phases[1]?.failureMessage).toContain(
+      "Skipped Phase B"
+    )
+  })
+
+  it("does not run Phase B after Lore formation refusal", async () => {
+    const { suitePath } = await writeTaskSuite({
+      workspace: { "status.js": "export function status() { return 'ok' }\n" },
+      suite: `version: 1
+runner: task
+longitudinal: true
+name: longitudinal-formation-refusal
+conditions:
+  - lore-full-loop
+scenarios:
+  - id: formation-refusal
+    agent: codex
+    workspace: ../workspaces/x
+    phaseA:
+      prompt: Inspect the status helper.
+    phaseB:
+      prompt: Continue the status helper.
+    verifiers:
+      - type: file-contents-match
+        path: status.js
+        pattern: status
+`,
+    })
+
+    let agentRuns = 0
+    const adapter = mockAdapter("codex", async () => {
+      agentRuns += 1
+      return successResult()
+    })
+    let formContextCalls = 0
+    let loadContextCalls = 0
+    const loreAdapter: LongitudinalLoreAdapter = {
+      async createRun() {
+        return {
+          projectId: "project-1",
+          projectName: "Eval Sandbox/formation-refusal",
+          async formContext() {
+            formContextCalls += 1
+            throw new LongitudinalAdapterRefusedError("formation refused")
+          },
+          async loadContext() {
+            loadContextCalls += 1
+            throw new Error("loadContext should not run")
+          },
+          async cleanup() {},
+        }
+      },
+    }
+
+    const { artifact } = await runTaskEvalSuite(suitePath, {
+      outPath: join(await mkdtemp(join(tmpdir(), "lore-eval-task-")), "out.json"),
+      adapters: new Map<string, AgentAdapter>([["codex", adapter]]),
+      longitudinalLoreAdapter: loreAdapter,
+    })
+
+    if (!isLongitudinalTaskArtifact(artifact)) {
+      throw new Error("expected longitudinal artifact")
+    }
+    expect(agentRuns).toBe(1)
+    expect(formContextCalls).toBe(1)
+    expect(loadContextCalls).toBe(0)
+    expect(artifact.results[0]!.success).toBe(false)
+    expect(artifact.results[0]!.failureReason).toBe("adapter-refused")
+    expect(artifact.results[0]!.phases[0]).toMatchObject({
+      phase: "formation",
+      success: false,
+      failureReason: "adapter-refused",
+    })
+    expect(artifact.results[0]!.phases[1]).toMatchObject({
+      phase: "use",
+      success: false,
+      agentRun: null,
+      verifierResults: [],
+      failureReason: "adapter-refused",
+    })
+    expect(artifact.results[0]!.phases[1]?.failureMessage).toContain(
+      "formation refused"
+    )
   })
 
   it("rejects task.workspace paths that escape the eval-suite parent", async () => {
