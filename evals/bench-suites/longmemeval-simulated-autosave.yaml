@@ -1,0 +1,29 @@
+runner: bench
+benchmark: longmemeval
+suite: longmemeval-simulated-autosave
+corpus:
+  name: longmemeval_s_cleaned
+  path: evals/bench-corpora/longmemeval/longmemeval_s_cleaned.json
+agent:
+  model: gpt-4o-mini-2024-07-18
+  adapter: codex
+  systemPrompt: evals/prompts/longmemeval-agent-system-wake-up.txt
+  retrieval: wake-up-prefetch
+judge:
+  model: gpt-4o-2024-08-06
+  recallPrompt: evals/prompts/longmemeval-judge.txt
+  abstentionPrompt: evals/prompts/longmemeval-judge-abstention.txt
+ingestion:
+  strategy: simulated-autosave
+  extractionPrompt: evals/prompts/longmemeval-ingest-extract.txt
+  extractionModel: gpt-4o-mini-2024-07-18
+  extractionMaxTokens: 1000
+caps:
+  perExampleWrites: 500
+  perSuiteWrites: 250000
+notes: |
+  Structured-extraction ingestion variant: each haystack session is
+  transformed into Lore-shaped memory rows with title, synopsis,
+  keywords, closed-vocabulary tags, content, and auto-emitted mentions
+  facts. This bypasses the production durability filter while retaining
+  the enriched recall surface production autosave normally creates.

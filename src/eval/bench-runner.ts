@@ -41,6 +41,7 @@ import {
 } from "./bench-corpus.js"
 import {
   computeAgentCostUsd,
+  computeExtractionCostUsd,
   computeJudgeCostUsd,
   estimateIngestionCostUsd,
   getModelPricing,
@@ -64,11 +65,24 @@ import {
 import {
   runBenchIngest,
   runBenchRawTranscriptIngest,
+  runBenchSimulatedAutosaveIngest,
   type BenchIngestResult,
 } from "./bench-ingest.js"
+import type { EmitAutoMentionsResult } from "../core/auto-mentions.js"
+import type { CreateMemoryInput } from "../types.js"
+import {
+  FetchBenchExtractionClient,
+  SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+  SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+  SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA_VERSION,
+  SIMULATED_AUTOSAVE_EXTRACTION_TEMPERATURE,
+  type BenchExtractionClient,
+} from "./bench-simulated-autosave.js"
 import {
   COST_MEASUREMENT_CODEX_REPORTED,
   DIAGNOSTIC_COUNT_CAVEAT,
+  EXTRACTION_COST_MEASUREMENT_NOT_APPLICABLE,
+  EXTRACTION_COST_MEASUREMENT_OPENAI_REPORTED,
   TEMPORAL_FIDELITY_CAVEAT,
   type BenchExampleResult,
   type BenchFailureReason,
@@ -87,7 +101,11 @@ import {
   type AgentAdapter,
   type AgentRunResult,
 } from "./task-runner.js"
-import { benchSuiteSchema, loadBenchSuite } from "./schema.js"
+import {
+  benchSuiteSchema,
+  loadBenchSuite,
+  type BenchIngestionStrategy,
+} from "./schema.js"
 
 const SANDBOX_NAME_REGEX =
   /\b(sandbox|eval|test|scratch|staging|dev|playground)\b/i
@@ -222,6 +240,16 @@ export interface BenchSandbox {
     title: string
     content: string
   }): Promise<{ id: string; mutationCount: number }>
+  createSimulatedAutosaveMemoryInProject(input: {
+    projectId: string
+    createInput: CreateMemoryInput
+    mentionEntities: string[]
+  }): Promise<{
+    id: string
+    memoryMutationCount: number
+    mentionFacts: EmitAutoMentionsResult
+    notionMutationCount: number
+  }>
   /**
    * Fetch the wake-up-prefetch retrieval bundle for a single bench
    * question. Used by the `wake-up-prefetch` agent retrieval strategy:
@@ -276,6 +304,8 @@ export interface RunBenchOptions {
   agentAdapter?: AgentAdapter
   /** OpenAI client for the judge — defaults to the FetchOpenAIChatClient. */
   judgeClient?: OpenAIChatClient
+  /** OpenAI client for simulated-autosave extraction. */
+  extractionClient?: BenchExtractionClient
   /** Pricing override for tests. */
   pricing?: BenchPricing
   /** Judge prompts override for tests. */
@@ -627,6 +657,44 @@ function agentFailureToReason(
   return null
 }
 
+function emptyExampleIngestion(): BenchExampleResult["ingestion"] {
+  return {
+    tokensInput: 0,
+    extractionTokensPrompt: 0,
+    extractionTokensPromptCached: 0,
+    extractionTokensCompletion: 0,
+    extractionCostUsd: 0,
+    extractionCostMeasurement: EXTRACTION_COST_MEASUREMENT_NOT_APPLICABLE,
+    memoriesCreated: 0,
+    factsCreated: 0,
+    notionWrites: 0,
+    writeBudgetExceeded: false,
+    elapsedMs: 0,
+  }
+}
+
+function exampleIngestionFromResult(input: {
+  ingest: BenchIngestResult
+  extractionCostUsd: number
+  extractionMeasured: boolean
+}): BenchExampleResult["ingestion"] {
+  return {
+    tokensInput: 0,
+    extractionTokensPrompt: input.ingest.extractionUsage.promptTokens,
+    extractionTokensPromptCached: input.ingest.extractionUsage.cachedPromptTokens,
+    extractionTokensCompletion: input.ingest.extractionUsage.completionTokens,
+    extractionCostUsd: input.extractionCostUsd,
+    extractionCostMeasurement: input.extractionMeasured
+      ? EXTRACTION_COST_MEASUREMENT_OPENAI_REPORTED
+      : EXTRACTION_COST_MEASUREMENT_NOT_APPLICABLE,
+    memoriesCreated: input.ingest.memoriesCreated,
+    factsCreated: input.ingest.factsCreated,
+    notionWrites: input.ingest.notionWrites,
+    writeBudgetExceeded: input.ingest.writeBudgetExceeded,
+    elapsedMs: input.ingest.elapsedMs,
+  }
+}
+
 export interface BenchRunnerLogSink {
   info(message: string): void
   warn(message: string): void
@@ -663,7 +731,11 @@ export async function runBenchExample(input: {
    * directly via the sandbox's `createMemoryInProject`, bypassing
    * the autosave filter for Zep-comparable apples-to-apples.
    */
-  ingestionStrategy: "lore-mine" | "raw-transcript"
+  ingestionStrategy: BenchIngestionStrategy
+  extractionPrompt?: string
+  extractionClient?: BenchExtractionClient
+  extractionModel?: string
+  extractionMaxTokens?: number
   /**
    * `tool-driven` (V1 default): agent has MCP tools registered and
    * decides when to call them. Structurally unavailable under
@@ -700,14 +772,7 @@ export async function runBenchExample(input: {
       success: false,
       failureReason: "ingestion-error",
       cleanupFailure: null,
-      ingestion: {
-        tokensInput: 0,
-        memoriesCreated: 0,
-        factsCreated: 0,
-        notionWrites: 0,
-        writeBudgetExceeded: false,
-        elapsedMs: 0,
-      },
+      ingestion: emptyExampleIngestion(),
       agent: {
         elapsedMs: 0,
         tokensPrompt: 0,
@@ -768,28 +833,65 @@ export async function runBenchExample(input: {
     // discovery channel for the mining child.
     const miningCwd =
       process.env["LORE_BENCH_CONFIG_ROOT"] ?? workspace
-    const ingest: BenchIngestResult =
-      input.ingestionStrategy === "raw-transcript"
-        ? await runBenchRawTranscriptIngest({
-            example: input.example,
-            projectId,
-            perExampleWrites: input.perExampleWrites,
-            createMemoryInProject: input.sandbox.createMemoryInProject,
-            countMemoriesForProject: input.sandbox.countMemoriesForProject,
-            countFactsForProject: input.sandbox.countFactsForProject,
-          })
-        : await runBenchIngest({
-            example: input.example,
-            cwd: miningCwd,
-            subProjects: [projectName],
-            catchAllName: null,
-            budgetStateFile,
-            projectId,
-            authSource: input.sandbox.authSource,
-            perSessionTimeoutMs: input.perSessionMiningTimeoutMs,
-            countMemoriesForProject: input.sandbox.countMemoriesForProject,
-            countFactsForProject: input.sandbox.countFactsForProject,
-          })
+    let ingest: BenchIngestResult
+    if (input.ingestionStrategy === "raw-transcript") {
+      ingest = await runBenchRawTranscriptIngest({
+        example: input.example,
+        projectId,
+        perExampleWrites: input.perExampleWrites,
+        createMemoryInProject: input.sandbox.createMemoryInProject,
+        countMemoriesForProject: input.sandbox.countMemoriesForProject,
+        countFactsForProject: input.sandbox.countFactsForProject,
+      })
+    } else if (input.ingestionStrategy === "simulated-autosave") {
+      if (!input.extractionPrompt || !input.extractionClient) {
+        throw new Error(
+          "simulated-autosave ingestion requires extractionPrompt and extractionClient",
+        )
+      }
+      ingest = await runBenchSimulatedAutosaveIngest({
+        example: input.example,
+        projectId,
+        perExampleWrites: input.perExampleWrites,
+        extractionPrompt: input.extractionPrompt,
+        extractionClient: input.extractionClient,
+        extractionModel: input.extractionModel,
+        extractionMaxTokens: input.extractionMaxTokens,
+        createSimulatedAutosaveMemoryInProject:
+          input.sandbox.createSimulatedAutosaveMemoryInProject,
+        countMemoriesForProject: input.sandbox.countMemoriesForProject,
+        countFactsForProject: input.sandbox.countFactsForProject,
+      })
+    } else {
+      ingest = await runBenchIngest({
+        example: input.example,
+        cwd: miningCwd,
+        subProjects: [projectName],
+        catchAllName: null,
+        budgetStateFile,
+        projectId,
+        authSource: input.sandbox.authSource,
+        perSessionTimeoutMs: input.perSessionMiningTimeoutMs,
+        countMemoriesForProject: input.sandbox.countMemoriesForProject,
+        countFactsForProject: input.sandbox.countFactsForProject,
+      })
+    }
+
+    const extractionMeasured = input.ingestionStrategy === "simulated-autosave"
+    const extractionCostUsd = extractionMeasured
+      ? computeExtractionCostUsd(
+          ingest.extractionUsage,
+          getModelPricing(
+            input.pricing,
+            input.extractionModel ?? SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+          ),
+        )
+      : 0
+    const ingestion = exampleIngestionFromResult({
+      ingest,
+      extractionCostUsd,
+      extractionMeasured,
+    })
 
     const ingestionFailureReason = ingestFailureToReason(ingest)
     if (ingestionFailureReason) {
@@ -799,14 +901,7 @@ export async function runBenchExample(input: {
         success: false,
         failureReason: ingestionFailureReason,
         cleanupFailure: null,
-        ingestion: {
-          tokensInput: 0,
-          memoriesCreated: ingest.memoriesCreated,
-          factsCreated: ingest.factsCreated,
-          notionWrites: ingest.notionWrites,
-          writeBudgetExceeded: ingest.writeBudgetExceeded,
-          elapsedMs: ingest.elapsedMs,
-        },
+        ingestion,
         agent: {
           elapsedMs: 0,
           tokensPrompt: 0,
@@ -879,14 +974,7 @@ export async function runBenchExample(input: {
           success: false,
           failureReason: agentFailureReason,
           cleanupFailure: null,
-          ingestion: {
-            tokensInput: 0,
-            memoriesCreated: ingest.memoriesCreated,
-            factsCreated: ingest.factsCreated,
-            notionWrites: ingest.notionWrites,
-            writeBudgetExceeded: ingest.writeBudgetExceeded,
-            elapsedMs: ingest.elapsedMs,
-          },
+          ingestion,
           agent: {
             elapsedMs: agentElapsedMs,
             tokensPrompt: parsed.usage?.input_tokens ?? 0,
@@ -929,14 +1017,7 @@ export async function runBenchExample(input: {
           success,
           failureReason: judgeFailureReason,
           cleanupFailure: null,
-          ingestion: {
-            tokensInput: 0,
-            memoriesCreated: ingest.memoriesCreated,
-            factsCreated: ingest.factsCreated,
-            notionWrites: ingest.notionWrites,
-            writeBudgetExceeded: ingest.writeBudgetExceeded,
-            elapsedMs: ingest.elapsedMs,
-          },
+          ingestion,
           agent: {
             elapsedMs: agentElapsedMs,
             tokensPrompt: parsed.usage?.input_tokens ?? 0,
@@ -1077,9 +1158,22 @@ async function runBenchSuiteUnderBenchEnv(
   const systemPromptPath = resolveAsset(suite.agent.systemPrompt)
   const systemPrompt = await readFile(systemPromptPath, "utf-8")
   const systemPromptSha256 = sha256Hex(systemPrompt)
+  const extractionPromptPath =
+    suite.ingestion.strategy === "simulated-autosave"
+      ? suite.ingestion.extractionPrompt
+      : undefined
+  const extractionPrompt = extractionPromptPath
+    ? await readFile(resolveAsset(extractionPromptPath), "utf-8")
+    : null
+  const extractionPromptSha256 = extractionPrompt
+    ? sha256Hex(extractionPrompt)
+    : null
   const judgeClient =
     options.judgeClient ??
     new FetchOpenAIChatClient(process.env["LORE_BENCH_OPENAI_API_KEY"] ?? "")
+  const extractionClient =
+    options.extractionClient ??
+    new FetchBenchExtractionClient(process.env["LORE_BENCH_OPENAI_API_KEY"] ?? "")
   const agentAdapter = options.agentAdapter ?? new CodexAgentAdapter()
   const now = options.now ?? (() => new Date())
   const startedAt = now().toISOString()
@@ -1147,9 +1241,25 @@ async function runBenchSuiteUnderBenchEnv(
       seam:
         suite.ingestion.strategy === "raw-transcript"
           ? "raw-transcript"
-          : "runConversationMining",
+          : suite.ingestion.strategy === "simulated-autosave"
+            ? "structured-extract-create-with-auto-mentions"
+            : "runConversationMining",
       temporalApproach: "C-caveat-only",
       vault: "bench-sandbox",
+      ...(suite.ingestion.strategy === "simulated-autosave"
+        ? {
+            extractionModel:
+              suite.ingestion.extractionModel ??
+              SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+            extractionPromptSha256: extractionPromptSha256 ?? "",
+            extractionTemperature: SIMULATED_AUTOSAVE_EXTRACTION_TEMPERATURE,
+            extractionMaxTokens:
+              suite.ingestion.extractionMaxTokens ??
+              SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+            extractionSchemaVersion:
+              SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA_VERSION,
+          }
+        : {}),
     },
     // Suite write caps participate in the hash because they shape
     // run behavior: `perExampleWrites` installs the MCP-child write-
@@ -1195,6 +1305,7 @@ async function runBenchSuiteUnderBenchEnv(
 
   let agentUsdSoFar = 0
   let judgeUsdSoFar = 0
+  let extractionUsdSoFar = 0
   let totalSessionsIngested = 0
 
   for (const example of examples) {
@@ -1208,15 +1319,16 @@ async function runBenchSuiteUnderBenchEnv(
       log.warn(abortReason)
       break
     }
-    const ingestionEstimatedUsd = estimateIngestionCostUsd(
-      totalSessionsIngested,
-      pricing,
-    )
+    const ingestionEstimatedUsd =
+      suite.ingestion.strategy === "simulated-autosave"
+        ? 0
+        : estimateIngestionCostUsd(totalSessionsIngested, pricing)
     if (
       Number.isFinite(costCapUsd) &&
       projectedTotalUsd({
         agentUsdSoFar,
         judgeUsdSoFar,
+        extractionUsdSoFar,
         ingestionEstimatedUsdSoFar: ingestionEstimatedUsd,
       }) >= costCapUsd
     ) {
@@ -1238,6 +1350,10 @@ async function runBenchSuiteUnderBenchEnv(
       sandbox: options.sandbox,
       perExampleWrites: suite.caps.perExampleWrites,
       ingestionStrategy: suite.ingestion.strategy,
+      extractionPrompt: extractionPrompt ?? undefined,
+      extractionClient,
+      extractionModel: suite.ingestion.extractionModel,
+      extractionMaxTokens: suite.ingestion.extractionMaxTokens,
       agentRetrieval: suite.agent.retrieval,
       systemPrompt,
       perSessionMiningTimeoutMs: options.perSessionMiningTimeoutMs,
@@ -1270,6 +1386,7 @@ async function runBenchSuiteUnderBenchEnv(
       },
       judgePricing,
     )
+    extractionUsdSoFar += result.ingestion.extractionCostUsd
     const stat = byCategory[result.category]
     if (stat) {
       stat.n += 1
@@ -1292,10 +1409,10 @@ async function runBenchSuiteUnderBenchEnv(
   const agentElapsed = results.map((r) => r.agent.elapsedMs)
   const ingestionElapsed = results.map((r) => r.ingestion.elapsedMs)
   const judgeElapsed = results.map((r) => r.judge.elapsedMs)
-  const ingestionEstimatedUsd = estimateIngestionCostUsd(
-    totalSessionsIngested,
-    pricing,
-  )
+  const ingestionEstimatedUsd =
+    suite.ingestion.strategy === "simulated-autosave"
+      ? 0
+      : estimateIngestionCostUsd(totalSessionsIngested, pricing)
 
   const summary: BenchSummary = {
     configHash,
@@ -1325,9 +1442,17 @@ async function runBenchSuiteUnderBenchEnv(
       cost: {
         agentUsd: round2(agentUsdSoFar),
         judgeUsd: round2(judgeUsdSoFar),
-        runnerMeasuredUsd: round2(agentUsdSoFar + judgeUsdSoFar),
+        extractionUsd: round2(extractionUsdSoFar),
+        runnerMeasuredUsd: round2(
+          agentUsdSoFar + judgeUsdSoFar + extractionUsdSoFar,
+        ),
         ingestionEstimatedUsd: round2(ingestionEstimatedUsd),
-        totalEstimatedUsd: round2(agentUsdSoFar + judgeUsdSoFar + ingestionEstimatedUsd),
+        totalEstimatedUsd: round2(
+          agentUsdSoFar +
+            judgeUsdSoFar +
+            extractionUsdSoFar +
+            ingestionEstimatedUsd,
+        ),
       },
     },
     failureBreakdown,

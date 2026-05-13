@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   computeAgentCostUsd,
+  computeExtractionCostUsd,
   computeJudgeCostUsd,
   estimateIngestionCostUsd,
   parseCodexUsage,
@@ -114,6 +115,26 @@ describe("computeJudgeCostUsd", () => {
   })
 })
 
+describe("computeExtractionCostUsd", () => {
+  it("charges OpenAI-reported extraction usage with cached prompt discount", () => {
+    const pricing = {
+      inputPer1K: 0.001,
+      cachedInputPer1K: 0.0005,
+      outputPer1K: 0.002,
+      reasoningOutputPer1K: 0.002,
+    }
+    const cost = computeExtractionCostUsd(
+      {
+        promptTokens: 3000,
+        cachedPromptTokens: 1000,
+        completionTokens: 500,
+      },
+      pricing,
+    )
+    expect(cost).toBeCloseTo(2 * 0.001 + 1 * 0.0005 + 0.5 * 0.002)
+  })
+})
+
 describe("estimateIngestionCostUsd", () => {
   it("scales sessions by per-session pricing", () => {
     const pricing = {
@@ -129,13 +150,14 @@ describe("estimateIngestionCostUsd", () => {
 })
 
 describe("projectedTotalUsd", () => {
-  it("sums all three components", () => {
+  it("sums all measured and estimated components", () => {
     expect(
       projectedTotalUsd({
         agentUsdSoFar: 1.2,
         judgeUsdSoFar: 0.4,
+        extractionUsdSoFar: 0.3,
         ingestionEstimatedUsdSoFar: 2.0,
       }),
-    ).toBeCloseTo(3.6)
+    ).toBeCloseTo(3.9)
   })
 })

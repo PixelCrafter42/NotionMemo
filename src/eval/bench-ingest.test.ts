@@ -6,9 +6,11 @@ import {
   readBudgetCount,
   runBenchIngest,
   runBenchRawTranscriptIngest,
+  runBenchSimulatedAutosaveIngest,
 } from "./bench-ingest.js"
 import type { MiningResult } from "../hooks/conversation-mining.js"
 import type { LongMemEvalExample } from "./bench-corpus.js"
+import type { BenchExtractionClient } from "./bench-simulated-autosave.js"
 
 function buildExample(
   sessionCount: number,
@@ -249,6 +251,143 @@ describe("runBenchRawTranscriptIngest", () => {
       "Session 1: custom-id-a",
       "Session 2: custom-id-b",
     ])
+  })
+})
+
+describe("runBenchSimulatedAutosaveIngest", () => {
+  function extractionClient(memoriesPerSession: number): BenchExtractionClient {
+    return {
+      async complete() {
+        return {
+          content: JSON.stringify({
+            memories: Array.from({ length: memoriesPerSession }, (_, i) => ({
+              title: `Memory ${i}`,
+              synopsis: `Synopsis ${i}`,
+              keywords: `keyword-${i}`,
+              tags: ["backend"],
+              content: `Content ${i}`,
+              entities: [`Entity ${i}`],
+            })),
+          }),
+          finishReason: "stop",
+          refusal: null,
+          usage: {
+            promptTokens: 10,
+            cachedPromptTokens: 2,
+            completionTokens: 3,
+          },
+        }
+      },
+    }
+  }
+
+  it("dispatches every extracted memory while sessionsReplayed counts input sessions", async () => {
+    const writes: Array<{ session: string | undefined; mentionEntities: string[] }> =
+      []
+    const result = await runBenchSimulatedAutosaveIngest({
+      example: buildExample(5),
+      projectId: "project-1",
+      perExampleWrites: 500,
+      extractionPrompt: "extract",
+      extractionClient: extractionClient(3),
+      createSimulatedAutosaveMemoryInProject: async (input) => {
+        writes.push({
+          session: input.createInput.session,
+          mentionEntities: input.mentionEntities,
+        })
+        return {
+          id: `memory-${writes.length}`,
+          memoryMutationCount: 2,
+          mentionFacts: {
+            attempted: 1,
+            fulfilled: 1,
+            freshCreated: 1,
+            notionMutationCount: 1,
+          },
+          notionMutationCount: 3,
+        }
+      },
+      countMemoriesForProject: async () => 15,
+      countFactsForProject: async () => 15,
+    })
+
+    expect(writes).toHaveLength(15)
+    expect(result.sessionsReplayed).toBe(5)
+    expect(result.memoriesCreated).toBe(15)
+    expect(result.factsCreated).toBe(15)
+    expect(result.notionWrites).toBe(45)
+    expect(result.extractionUsage).toEqual({
+      promptTokens: 50,
+      cachedPromptTokens: 10,
+      completionTokens: 15,
+    })
+    expect(writes[0]).toEqual({
+      session: "lme_s_test_001#s0",
+      mentionEntities: ["Entity 0"],
+    })
+  })
+
+  it("uses conservative simulated-autosave write headroom before writes", async () => {
+    let writes = 0
+    const result = await runBenchSimulatedAutosaveIngest({
+      example: buildExample(1),
+      projectId: "project-1",
+      perExampleWrites: 26,
+      extractionPrompt: "extract",
+      extractionClient: extractionClient(1),
+      createSimulatedAutosaveMemoryInProject: async () => {
+        writes += 1
+        return {
+          id: "memory-1",
+          memoryMutationCount: 2,
+          mentionFacts: {
+            attempted: 0,
+            fulfilled: 0,
+            freshCreated: 0,
+            notionMutationCount: 0,
+          },
+          notionMutationCount: 2,
+        }
+      },
+      countMemoriesForProject: async () => 0,
+      countFactsForProject: async () => 0,
+    })
+
+    expect(writes).toBe(0)
+    expect(result.writeBudgetExceeded).toBe(true)
+    expect(result.failureReason).toBe("write-cap-exceeded")
+  })
+
+  it("turns extraction failures into ingestion-error with attempted usage", async () => {
+    const result = await runBenchSimulatedAutosaveIngest({
+      example: buildExample(1),
+      projectId: "project-1",
+      perExampleWrites: 500,
+      extractionPrompt: "extract",
+      extractionClient: {
+        async complete() {
+          return {
+            content: "{not-json",
+            finishReason: "stop",
+            refusal: null,
+            usage: {
+              promptTokens: 10,
+              cachedPromptTokens: 1,
+              completionTokens: 2,
+            },
+          }
+        },
+      },
+      createSimulatedAutosaveMemoryInProject: async () => {
+        throw new Error("should not write")
+      },
+      countMemoriesForProject: async () => 0,
+      countFactsForProject: async () => 0,
+    })
+
+    expect(result.failureReason).toBe("ingestion-error")
+    expect(result.failureMessage).toMatch(/Simulated-autosave extraction failed/)
+    expect(result.extractionUsage.promptTokens).toBe(20)
   })
 })
 

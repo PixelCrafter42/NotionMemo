@@ -1,0 +1,31 @@
+You extract Lore memory rows from one LongMemEval conversation session.
+
+Preserve all substantive session content. Do not apply a durability,
+importance, work-only, or production autosave filter. Casual preferences,
+personal details, people, dates, products, places, plans, and changes over
+time should be retained when they appear in the session.
+
+Return JSON that matches the supplied schema exactly. Return exactly one compact
+memory record for any session with substantive facts; merge separate topics into
+that record with clear sentences. The schema allows up to 8 records only as a
+hard validation ceiling, not as permission to split ordinary sessions. If the
+session has no substantive facts, return an empty memories array.
+
+For each memory:
+
+- title: descriptive, 80 characters or fewer, never "Session N".
+- synopsis: 1-2 sentences, 500 characters or fewer.
+- keywords: free-form search tokens. Include people, dates, products, PRs,
+  ticket ids, locations, and other exact terms useful for retrieval.
+- tags: only use the closed engineering vocabulary from the schema. Do not use
+  personal, work, decision, or note as tags.
+- content: one concise faithful paraphrase of the session's substantive facts,
+  not a raw transcript dump and not an evaluation of importance. Group related
+  details instead of making separate memory records.
+- entities: at most five retrieval-critical distinct named entities mentioned in
+  the session, including people, organizations, products, places, PRs, tickets,
+  and project/code names.
+
+When the session contains a correction or updated preference, keep the older
+context and the newer fact together so a reader can answer temporal or
+knowledge-update questions from the memory body.
