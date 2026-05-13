@@ -10,6 +10,7 @@
 
 import { initServices } from "../services.js"
 import { resolveProjectByName } from "../core/project-scope.js"
+import { emitAutoMentions } from "../core/auto-mentions.js"
 import type { BenchSandbox } from "./bench-runner.js"
 
 /**
@@ -69,6 +70,25 @@ export async function buildBenchSandbox(): Promise<BenchSandbox> {
       // contract.
       const mutationCount = input.content.length > 0 ? 2 : 1
       return { id: memory.id, mutationCount }
+    },
+    async createSimulatedAutosaveMemoryInProject(input) {
+      const memory = await services.memories.create({
+        ...input.createInput,
+        projectIds: input.createInput.projectIds ?? [input.projectId],
+      })
+      const memoryMutationCount = input.createInput.content.length > 0 ? 2 : 1
+      const mentionFacts = await emitAutoMentions({
+        facts: services.facts,
+        memory,
+        extraEntities: input.mentionEntities,
+      })
+      return {
+        id: memory.id,
+        memoryMutationCount,
+        mentionFacts,
+        notionMutationCount:
+          memoryMutationCount + mentionFacts.notionMutationCount,
+      }
     },
     async getWakeUpForQuery(input) {
       // The `wake-up-prefetch` retrieval strategy fans out one

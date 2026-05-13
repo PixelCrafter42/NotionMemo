@@ -17,6 +17,7 @@
 
 import { readFile } from "node:fs/promises"
 import { z } from "zod"
+import type { BenchExtractionUsage } from "./bench-simulated-autosave.js"
 
 const perModelPricingSchema = z
   .object({
@@ -159,6 +160,19 @@ export function computeJudgeCostUsd(
   )
 }
 
+export function computeExtractionCostUsd(
+  usage: BenchExtractionUsage,
+  pricing: PerModelPricing,
+): number {
+  const cached = usage.cachedPromptTokens
+  const uncached = Math.max(0, usage.promptTokens - cached)
+  return (
+    (uncached / 1000) * pricing.inputPer1K +
+    (cached / 1000) * pricing.cachedInputPer1K +
+    (usage.completionTokens / 1000) * pricing.outputPer1K
+  )
+}
+
 export function estimateIngestionCostUsd(
   sessionCount: number,
   pricing: BenchPricing,
@@ -174,9 +188,15 @@ export function estimateIngestionCostUsd(
 export interface ProjectedCostInput {
   agentUsdSoFar: number
   judgeUsdSoFar: number
+  extractionUsdSoFar?: number
   ingestionEstimatedUsdSoFar: number
 }
 
 export function projectedTotalUsd(input: ProjectedCostInput): number {
-  return input.agentUsdSoFar + input.judgeUsdSoFar + input.ingestionEstimatedUsdSoFar
+  return (
+    input.agentUsdSoFar +
+    input.judgeUsdSoFar +
+    (input.extractionUsdSoFar ?? 0) +
+    input.ingestionEstimatedUsdSoFar
+  )
 }

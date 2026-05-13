@@ -57,6 +57,11 @@ function buildArtifact(overrides: Partial<BenchRunArtifact> = {}): BenchRunArtif
         cleanupFailure: null,
         ingestion: {
           tokensInput: 0,
+          extractionTokensPrompt: 0,
+          extractionTokensPromptCached: 0,
+          extractionTokensCompletion: 0,
+          extractionCostUsd: 0,
+          extractionCostMeasurement: "not-applicable",
           memoriesCreated: 1,
           factsCreated: 0,
           notionWrites: 1,
@@ -110,6 +115,7 @@ function buildArtifact(overrides: Partial<BenchRunArtifact> = {}): BenchRunArtif
         cost: {
           agentUsd: 0,
           judgeUsd: 0,
+          extractionUsd: 0,
           runnerMeasuredUsd: 0,
           ingestionEstimatedUsd: 0,
           totalEstimatedUsd: 0,
@@ -191,6 +197,49 @@ describe("computeConfigHash", () => {
       caps: { ...baseline.caps, perSuiteWrites: baseline.caps.perSuiteWrites + 1 },
     }
     expect(computeConfigHash(modified)).not.toBe(computeConfigHash(baseline))
+  })
+
+  it("changes when simulated-autosave extraction config changes", () => {
+    const baseline = {
+      ...buildArtifact().config,
+      ingestion: {
+        strategy: "simulated-autosave",
+        seam: "structured-extract-create-with-auto-mentions",
+        temporalApproach: "C-caveat-only",
+        vault: "bench-sandbox",
+        extractionModel: "gpt-4o-mini-2024-07-18",
+        extractionPromptSha256: "1".repeat(64),
+        extractionTemperature: 0,
+        extractionMaxTokens: 1000,
+        extractionSchemaVersion: 1,
+      },
+    }
+    const variants = [
+      {
+        ...baseline,
+        ingestion: { ...baseline.ingestion, extractionModel: "other-model" },
+      },
+      {
+        ...baseline,
+        ingestion: { ...baseline.ingestion, extractionPromptSha256: "2".repeat(64) },
+      },
+      {
+        ...baseline,
+        ingestion: { ...baseline.ingestion, extractionTemperature: 0.1 },
+      },
+      {
+        ...baseline,
+        ingestion: { ...baseline.ingestion, extractionMaxTokens: 1001 },
+      },
+      {
+        ...baseline,
+        ingestion: { ...baseline.ingestion, extractionSchemaVersion: 2 },
+      },
+    ]
+    const baselineHash = computeConfigHash(baseline)
+    for (const variant of variants) {
+      expect(computeConfigHash(variant)).not.toBe(baselineHash)
+    }
   })
 })
 

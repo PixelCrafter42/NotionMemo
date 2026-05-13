@@ -40,6 +40,20 @@ import type {
   LongMemEvalSessionTurn,
 } from "./bench-corpus.js"
 import { renderSessionTranscript } from "./bench-corpus.js"
+import type { EmitAutoMentionsResult } from "../core/auto-mentions.js"
+import { SIMULATED_AUTOSAVE_MAX_MUTATIONS_PER_MEMORY } from "../core/auto-mentions.js"
+import type { CreateMemoryInput } from "../types.js"
+import {
+  addExtractionUsage,
+  extractSimulatedAutosaveMemories,
+  normalizeSimulatedAutosaveMemories,
+  SimulatedAutosaveExtractionError,
+  SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+  SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+  zeroExtractionUsage,
+  type BenchExtractionClient,
+  type BenchExtractionUsage,
+} from "./bench-simulated-autosave.js"
 
 export type BenchIngestFailureReason =
   | "write-cap-exceeded"
@@ -52,6 +66,7 @@ export interface BenchIngestResult {
   elapsedMs: number
   /** Number of sessions actually replayed (may be < example.sessions). */
   sessionsReplayed: number
+  extractionUsage: BenchExtractionUsage
   /**
    * Best-effort count of Notion mutations the ingest performed. Source
    * varies by strategy and shutdown path — read
@@ -243,6 +258,7 @@ export async function runBenchIngest(
   return {
     elapsedMs: now() - t0,
     sessionsReplayed,
+    extractionUsage: zeroExtractionUsage(),
     notionWrites,
     notionWritesIsAuthoritative: budgetCountAvailable,
     memoriesCreated,
@@ -373,10 +389,134 @@ export async function runBenchRawTranscriptIngest(
   return {
     elapsedMs: now() - t0,
     sessionsReplayed,
+    extractionUsage: zeroExtractionUsage(),
     notionWrites,
     // Raw-transcript counts mutations directly per call site (no
     // out-of-process proxy involvement), so the value is exact by
     // construction.
+    notionWritesIsAuthoritative: true,
+    memoriesCreated,
+    factsCreated,
+    writeBudgetExceeded,
+    failureReason,
+    failureMessage,
+  }
+}
+
+export interface RunBenchSimulatedAutosaveInput {
+  example: LongMemEvalExample
+  projectId: string
+  perExampleWrites: number
+  extractionPrompt: string
+  extractionClient: BenchExtractionClient
+  extractionModel?: string
+  extractionMaxTokens?: number
+  createSimulatedAutosaveMemoryInProject: (input: {
+    projectId: string
+    createInput: CreateMemoryInput
+    mentionEntities: string[]
+  }) => Promise<{
+    id: string
+    memoryMutationCount: number
+    mentionFacts: EmitAutoMentionsResult
+    notionMutationCount: number
+  }>
+  countMemoriesForProject: (projectId: string) => Promise<number>
+  countFactsForProject: (projectId: string) => Promise<number>
+  now?: () => number
+}
+
+export async function runBenchSimulatedAutosaveIngest(
+  input: RunBenchSimulatedAutosaveInput,
+): Promise<BenchIngestResult> {
+  const now = input.now ?? Date.now
+  const t0 = now()
+  let sessionsReplayed = 0
+  let notionWrites = 0
+  let extractionUsage = zeroExtractionUsage()
+  let writeBudgetExceeded = false
+  let failureReason: BenchIngestFailureReason | null = null
+  let failureMessage: string | null = null
+
+  const sessions: LongMemEvalSessionTurn[][] = input.example.haystack_sessions
+
+  sessionLoop: for (let i = 0; i < sessions.length; i += 1) {
+    const session = sessions[i]
+    sessionsReplayed += 1
+    if (!session || session.length === 0) continue
+    const transcript = renderSessionTranscript(session)
+    if (transcript.length === 0) continue
+    const sessionId =
+      input.example.haystack_session_ids?.[i] ?? `${input.example.question_id}#s${i}`
+
+    let extracted: Awaited<ReturnType<typeof extractSimulatedAutosaveMemories>>
+    try {
+      extracted = await extractSimulatedAutosaveMemories({
+        client: input.extractionClient,
+        extractionPrompt: input.extractionPrompt,
+        transcript,
+        model: input.extractionModel ?? SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+        maxTokens:
+          input.extractionMaxTokens ??
+          SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+      })
+      extractionUsage = addExtractionUsage(extractionUsage, extracted.usage)
+    } catch (err) {
+      if (err instanceof SimulatedAutosaveExtractionError) {
+        extractionUsage = addExtractionUsage(extractionUsage, err.usage)
+      }
+      failureReason = "ingestion-error"
+      failureMessage = err instanceof Error ? err.message : String(err)
+      break
+    }
+
+    const plans = normalizeSimulatedAutosaveMemories({
+      raw: extracted.raw,
+      projectId: input.projectId,
+      sessionId,
+    })
+
+    for (const plan of plans) {
+      if (
+        notionWrites + SIMULATED_AUTOSAVE_MAX_MUTATIONS_PER_MEMORY >
+        input.perExampleWrites
+      ) {
+        writeBudgetExceeded = true
+        failureReason = "write-cap-exceeded"
+        failureMessage = `Write budget reached after ${sessionsReplayed} session(s).`
+        break sessionLoop
+      }
+      try {
+        const result = await input.createSimulatedAutosaveMemoryInProject({
+          projectId: input.projectId,
+          createInput: plan.createInput,
+          mentionEntities: plan.mentionEntities,
+        })
+        notionWrites += result.notionMutationCount
+      } catch (err) {
+        failureReason = "ingestion-error"
+        failureMessage = err instanceof Error ? err.message : String(err)
+        break sessionLoop
+      }
+    }
+  }
+
+  const [memoriesCreated, factsCreated] = await Promise.all([
+    input.countMemoriesForProject(input.projectId).catch((err) => {
+      logDiagnosticCountError("memories", input.projectId, err)
+      return 0
+    }),
+    input.countFactsForProject(input.projectId).catch((err) => {
+      logDiagnosticCountError("facts", input.projectId, err)
+      return 0
+    }),
+  ])
+
+  return {
+    elapsedMs: now() - t0,
+    sessionsReplayed,
+    extractionUsage,
+    notionWrites,
     notionWritesIsAuthoritative: true,
     memoriesCreated,
     factsCreated,

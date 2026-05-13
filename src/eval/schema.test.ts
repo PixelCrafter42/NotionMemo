@@ -2,7 +2,33 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { evalSuiteSchema, loadEvalSuite } from "./schema.js"
+import {
+  benchSuiteSchema,
+  evalSuiteSchema,
+  loadBenchSuite,
+  loadEvalSuite,
+} from "./schema.js"
+
+const BENCH_BASE = {
+  runner: "bench",
+  benchmark: "longmemeval",
+  suite: "longmemeval-test",
+  corpus: {
+    name: "longmemeval_s_cleaned",
+    path: "evals/bench-corpora/longmemeval/longmemeval_s_cleaned.json",
+  },
+  agent: {
+    model: "gpt-4o-mini-2024-07-18",
+    adapter: "codex",
+    systemPrompt: "evals/prompts/longmemeval-agent-system-wake-up.txt",
+    retrieval: "wake-up-prefetch",
+  },
+  judge: {
+    model: "gpt-4o-2024-08-06",
+    recallPrompt: "evals/prompts/longmemeval-judge.txt",
+    abstentionPrompt: "evals/prompts/longmemeval-judge-abstention.txt",
+  },
+} as const
 
 describe("eval suite schema", () => {
   it("validates the committed starter suite", async () => {
@@ -195,5 +221,62 @@ tasks:
       tasks: [baseTask],
     })
     expect(rejected.success).toBe(false)
+  })
+})
+
+describe("bench suite schema ingestion extraction fields", () => {
+  it("validates the committed simulated-autosave suite", async () => {
+    const loaded = await loadBenchSuite(
+      "evals/bench-suites/longmemeval-simulated-autosave.yaml",
+    )
+    expect(loaded.suite.ingestion.strategy).toBe("simulated-autosave")
+    expect(loaded.suite.agent.retrieval).toBe("wake-up-prefetch")
+  })
+
+  it("accepts simulated-autosave with required extraction fields", () => {
+    const parsed = benchSuiteSchema.parse({
+      ...BENCH_BASE,
+      ingestion: {
+        strategy: "simulated-autosave",
+        extractionPrompt: "evals/prompts/longmemeval-ingest-extract.txt",
+        extractionModel: "gpt-4o-mini-2024-07-18",
+        extractionMaxTokens: 1000,
+      },
+    })
+    expect(parsed.ingestion.strategy).toBe("simulated-autosave")
+  })
+
+  it("rejects simulated-autosave when extraction fields are missing", () => {
+    const result = benchSuiteSchema.safeParse({
+      ...BENCH_BASE,
+      ingestion: {
+        strategy: "simulated-autosave",
+      },
+    })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues.map((issue) => issue.path.join("."))).toEqual(
+        expect.arrayContaining([
+          "ingestion.extractionPrompt",
+          "ingestion.extractionModel",
+          "ingestion.extractionMaxTokens",
+        ]),
+      )
+    }
+  })
+
+  it("rejects extraction fields on non-extraction strategies", () => {
+    for (const strategy of ["lore-mine", "raw-transcript"]) {
+      const result = benchSuiteSchema.safeParse({
+        ...BENCH_BASE,
+        ingestion: {
+          strategy,
+          extractionPrompt: "evals/prompts/longmemeval-ingest-extract.txt",
+          extractionModel: "gpt-4o-mini-2024-07-18",
+          extractionMaxTokens: 1000,
+        },
+      })
+      expect(result.success, `strategy=${strategy}`).toBe(false)
+    }
   })
 })

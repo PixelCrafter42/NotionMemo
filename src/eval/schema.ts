@@ -2,6 +2,10 @@ import { readFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
+import {
+  SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+  SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
+} from "./bench-simulated-autosave.js"
 
 export const EVAL_SUITE_VERSION = 1
 
@@ -211,7 +215,7 @@ export const evalMemoryScenarioSchema = z
  * silently disable a knob.
  */
 /**
- * Ingestion strategy for the bench. Two values:
+ * Ingestion strategy for the bench. Three values:
  *
  * - `lore-mine` (V1 default): each session is mined through the
  *   production Stop-hook autosave pipeline (`runConversationMining`
@@ -231,13 +235,21 @@ export const evalMemoryScenarioSchema = z
  *   token is stored, retrieval reads it back. Apples-to-apples with
  *   the published Zep LongMemEval numbers.
  *
- * The two strategies measure different things — V1 ships both,
- * suite YAML picks. The committed `longmemeval.yaml` keeps
- * `lore-mine` (V1 contract); a parallel `longmemeval-raw-transcript.yaml`
- * runs raw-transcript so operators can publish whichever number
- * matches the workload they're calibrating against.
+ * - `simulated-autosave`: each session is transformed by a structured
+ *   extraction prompt into Lore-shaped memories plus explicit mention
+ *   facts. Bypasses production autosave's durability filter like
+ *   raw-transcript, but preserves the enriched recall fields a
+ *   memory system would normally build at ingest time.
+ *
+ * The strategies measure different things; suite YAML picks. The
+ * committed `longmemeval.yaml` keeps `lore-mine`; sibling suites cover
+ * raw transcript and simulated-autosave comparisons.
  */
-export const BENCH_INGESTION_STRATEGIES = ["lore-mine", "raw-transcript"] as const
+export const BENCH_INGESTION_STRATEGIES = [
+  "lore-mine",
+  "raw-transcript",
+  "simulated-autosave",
+] as const
 export type BenchIngestionStrategy = (typeof BENCH_INGESTION_STRATEGIES)[number]
 
 /**
@@ -305,8 +317,47 @@ export const benchSuiteSchema = z
     ingestion: z
       .object({
         strategy: z.enum(BENCH_INGESTION_STRATEGIES).default("lore-mine"),
+        extractionPrompt: z.string().min(1).optional(),
+        extractionModel: z
+          .literal(SIMULATED_AUTOSAVE_EXTRACTION_MODEL)
+          .optional(),
+        extractionMaxTokens: z
+          .literal(SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS)
+          .optional(),
       })
       .strict()
+      .superRefine((ingestion, ctx) => {
+        const extractionFields = [
+          "extractionPrompt",
+          "extractionModel",
+          "extractionMaxTokens",
+        ] as const
+        if (ingestion.strategy === "simulated-autosave") {
+          for (const field of extractionFields) {
+            if (ingestion[field] === undefined) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: [field],
+                message:
+                  `${field} is required when ingestion.strategy is ` +
+                  '"simulated-autosave"',
+              })
+            }
+          }
+          return
+        }
+        for (const field of extractionFields) {
+          if (ingestion[field] !== undefined) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [field],
+              message:
+                `${field} is only valid when ingestion.strategy is ` +
+                '"simulated-autosave"',
+            })
+          }
+        }
+      })
       .default({ strategy: "lore-mine" }),
     caps: z
       .object({

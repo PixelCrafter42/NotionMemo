@@ -294,8 +294,8 @@ the steady-state cost + drift gate are trusted.
 
 ### Ingestion strategies
 
-Two strategies ship in V1; the suite YAML's `ingestion.strategy`
-chooses between them. Both produce the same artifact shape; the
+Three strategies ship; the suite YAML's `ingestion.strategy`
+chooses between them. All produce the same artifact shape; the
 `config.ingestion.strategy` and `config.ingestion.seam` fields
 record which path produced the numbers.
 
@@ -318,12 +318,47 @@ record which path produced the numbers.
   `lore-memory action='expand'`. Bypasses `runConversationMining`
   entirely — no `claude -p`, no autosave-prompt filter. Apples-to-apples
   with Zep's published Graphiti baseline on `longmemeval_s`.
+- **`simulated-autosave`** ([`longmemeval-simulated-autosave.yaml`](../evals/bench-suites/longmemeval-simulated-autosave.yaml)) —
+  each haystack session is sent through a deterministic structured
+  extraction prompt, then written as Lore-shaped memory rows with
+  title, synopsis, keywords, closed-vocabulary tags, body content, and
+  explicit `mentions` facts for extracted entities. This bypasses the
+  production autosave durability filter, so it is not a measurement of
+  what Lore writes during normal Stop-hook autosave. It is the
+  Zep-comparable enriched-ingestion surface: the full conversational
+  signal is retained, but the vault shape is closer to production Lore
+  recall than raw transcript dumps.
 
-Both strategies share the same per-example / per-suite write caps and
+All strategies share the same per-example / per-suite write caps and
 the same retrieval surface (the agent does not know which path
 populated the vault). Publishing a number alongside a Zep-comparable
 headline means picking `raw-transcript`; publishing a number that
 reflects what Lore writes in production means picking `lore-mine`.
+Use `simulated-autosave` when comparing against systems that enrich
+conversation turns at ingest time, and report the production-filter
+bypass trade-off with the result.
+
+Manual comparison for `simulated-autosave`: run the simulated suite and
+the same-sample wake-up suite with the same `--limit` and artifact
+paths, then compare their `summary.overall.accuracy`,
+`summary.overall.cost.totalEstimatedUsd`, and per-category stats:
+
+```bash
+node dist/cli.js eval run --runner bench \
+  evals/bench-suites/longmemeval-simulated-autosave.yaml \
+  --limit 10 \
+  --out evals/results/longmemeval-simulated-autosave-limit10.json
+
+node dist/cli.js eval run --runner bench \
+  evals/bench-suites/longmemeval-wake-up.yaml \
+  --limit 10 \
+  --out evals/results/longmemeval-wake-up-limit10.json
+```
+
+If simulated-autosave does not outperform raw-transcript plus
+wake-up-prefetch on the same sample, file a follow-up with both
+artifact paths and the observed deltas; the implementation remains
+valid as long as the artifact records the comparable fields.
 
 ### Agent retrieval strategies
 
@@ -364,6 +399,8 @@ The two strategies compose with `ingestion.strategy` independently:
 | `lore-mine` | `wake-up-prefetch` | Production write path × isolated retrieval surface | ✅ Yes |
 | `raw-transcript` | `tool-driven` | Full corpus fidelity × agent tool-call propensity (Zep-comparable headline) | ⚠️ Blocked on MCP-in-exec |
 | `raw-transcript` | `wake-up-prefetch` | Full corpus fidelity × isolated retrieval surface (V1 publishable headline) | ✅ Yes |
+| `simulated-autosave` | `tool-driven` | Enriched ingest × agent tool-call propensity (Zep-style enrichment surface) | ⚠️ Blocked on MCP-in-exec |
+| `simulated-autosave` | `wake-up-prefetch` | Enriched ingest × isolated retrieval surface | ✅ Yes |
 
 The V1 publishable headline lives at `longmemeval-wake-up.yaml`. The
 tool-driven Zep-comparable number becomes available once Codex ships

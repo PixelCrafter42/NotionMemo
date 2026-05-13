@@ -34,6 +34,7 @@ import {
   RICH_TEXT_PROPERTY_MAX_LEN,
   richTextPropertySchema,
 } from "../../core/rich-text-schema.js"
+import { emitAutoMentions } from "../../core/auto-mentions.js"
 import {
   extractEntityCandidates,
   findAutosaveLearningDuplicate,
@@ -732,91 +733,14 @@ async function handleSave(services: LoreServices, args: SaveArgs): Promise<ToolR
     //    keeping them independent lets `LORE_DISABLE_TASK_CROSSREF=1`
     //    and `LORE_DISABLE_AUTO_MENTIONS=1` toggle separately. The
     //    extractor is regex-only; the duplicate call is cheap.
-    const autoMentionsDisabled = process.env["LORE_DISABLE_AUTO_MENTIONS"] === "1"
-    let autoMentionsCount = 0
-    let autoMentionsAttempted = 0
-    if (!autoMentionsDisabled) {
-      // `decodeTextEntities` matches what `createWithDedup` applies
-      // internally inside `FactService` at the decode-at-write
-      // boundary. Decoding here as well keeps the on-the-wire `Object`
-      // value byte-identical between the input the dedup-key probe
-      // hashes and the input the update-time covered-set check
-      // compares against — without it, an entity name surfaced by
-      // the regex tokenizer that contains an HTML-decodable
-      // character (`Foo &amp; Bar` → `Foo & Bar`) would be stored
-      // decoded by `createWithDedup` but compared raw on update,
-      // producing a wasted Notion round-trip per update per
-      // affected entity. Idempotent — clean ASCII entities pass
-      // through unchanged.
-      const mentionedEntities = extractEntityCandidates(
-        memory.title,
-        memory.keywords,
-        memory.synopsis
-      ).map(decodeTextEntities)
-      if (mentionedEntities.length > 0) {
-        autoMentionsAttempted = mentionedEntities.length
-        const projectIds = memory.projectIds.length > 0 ? memory.projectIds : undefined
-        // The per-entity `.then(success, failure)` is load-bearing for
-        // failure isolation: it converts every rejection into a
-        // resolved boolean BEFORE `Promise.all` ever sees it, so a
-        // single per-entity 400 (e.g. an upgraded-vault that hasn't
-        // run `lore migrate` and still lacks the `mentions` select
-        // option) can't sink the surviving creates. Replacing this
-        // with `await Promise.all(...)` over bare `createWithDedup`
-        // calls would re-introduce fail-fast semantics — surviving
-        // creates would still resolve under the hood (Notion already
-        // accepted them) but the caller's await would re-throw the
-        // first rejection, the surrounding `try/catch` would emit a
-        // tool-level error, and the user would see a save failure
-        // even though the memory landed. `Promise.allSettled` would
-        // produce the same end state but at the cost of a per-row
-        // `.status === 'fulfilled'` filter at the consumer; the
-        // current shape lets the success/failure callbacks return
-        // typed booleans the count operation can sum directly.
-        // System-managed `mentions` facts must carry the saved
-        // memory's scope so a session-scoped memory
-        // does not silently emit broadcast facts that surface to
-        // every reader via `lore-query action='ask'`. The conversion
-        // from `Memory.scope` (read shape) to `MemoryScopeInput`
-        // (write shape) lives in `types.ts:memoryScopeToInput`.
-        const factScope = memoryScopeToInput(memory.scope)
-        // Route the per-entity fan-out through `createBatchWithDedup`
-        // so the auto-mention emission can opt into RunTool's
-        // `create_pages` batch primitive when
-        // `LORE_USE_RUNTOOL_BATCH_CREATES=1`. Flag-off, the method
-        // is byte-equivalent to `Promise.all(map(...))` shape via
-        // `Promise.allSettled(inputs.map(createWithDedup))`.
-        // The per-entity failure-isolation (a 400 on one mentions
-        // fact must not sink the surviving creates) is preserved by
-        // mapping the settled-result kind back into the boolean
-        // counter the response footer already consumes.
-        const settled = await services.facts.createBatchWithDedup(
-          mentionedEntities.map((entity) => ({
-            subject: memory.title,
-            predicate: "mentions",
-            object: entity,
-            sourceMemoryId: memory.id,
-            projectIds,
-            confidence: "speculative",
-            scope: factScope,
-          }))
-        )
-        autoMentionsCount = 0
-        for (let i = 0; i < settled.length; i += 1) {
-          const r = settled[i]!
-          if (r.status === "fulfilled") {
-            autoMentionsCount += 1
-          } else {
-            debugLogAutoFactFailure(
-              "save",
-              memory.id,
-              mentionedEntities[i]!,
-              r.reason
-            )
-          }
-        }
-      }
-    }
+    const autoMentions = await emitAutoMentions({
+      facts: services.facts,
+      memory,
+      onError: (entity, error) =>
+        debugLogAutoFactFailure("save", memory.id, entity, error),
+    })
+    const autoMentionsCount = autoMentions.fulfilled
+    const autoMentionsAttempted = autoMentions.attempted
 
     const projectLabel = args.projectNames?.length
       ? args.projectNames.join(", ")

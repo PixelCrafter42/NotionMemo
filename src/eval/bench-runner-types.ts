@@ -33,9 +33,21 @@ export type BenchFailureReason =
 
 export const COST_MEASUREMENT_CODEX_REPORTED = "codex-reported" as const
 export type CostMeasurement = typeof COST_MEASUREMENT_CODEX_REPORTED
+export const EXTRACTION_COST_MEASUREMENT_OPENAI_REPORTED =
+  "openai-reported" as const
+export const EXTRACTION_COST_MEASUREMENT_NOT_APPLICABLE =
+  "not-applicable" as const
+export type ExtractionCostMeasurement =
+  | typeof EXTRACTION_COST_MEASUREMENT_OPENAI_REPORTED
+  | typeof EXTRACTION_COST_MEASUREMENT_NOT_APPLICABLE
 
 export interface BenchExampleIngestion {
   tokensInput: number
+  extractionTokensPrompt: number
+  extractionTokensPromptCached: number
+  extractionTokensCompletion: number
+  extractionCostUsd: number
+  extractionCostMeasurement: ExtractionCostMeasurement
   memoriesCreated: number
   factsCreated: number
   notionWrites: number
@@ -98,6 +110,7 @@ export interface BenchSummaryCategoryStat {
 export interface BenchSummaryCost {
   agentUsd: number
   judgeUsd: number
+  extractionUsd: number
   runnerMeasuredUsd: number
   ingestionEstimatedUsd: number
   totalEstimatedUsd: number
@@ -178,6 +191,11 @@ export interface BenchArtifactConfig {
     seam: string
     temporalApproach: string
     vault: string
+    extractionModel?: string
+    extractionPromptSha256?: string
+    extractionTemperature?: number
+    extractionMaxTokens?: number
+    extractionSchemaVersion?: number
   }
   /**
    * Suite write caps. `perExampleWrites` installs the MCP-child
