@@ -6,6 +6,12 @@
  */
 
 import type { CreatePageParameters } from "@notionhq/client"
+import {
+  factPredicateSchemaOptions,
+  profilePropertyAdditions,
+  type ResolvedProfile,
+  type ResolvedProfileSchema,
+} from "../profile/index.js"
 
 // ---------------------------------------------------------------------------
 // Shared types for convenience
@@ -17,7 +23,24 @@ type PageProperties = CreatePageParameters["properties"]
  * Property configuration for database creation.
  * Uses the new initial_data_source.properties shape.
  */
-type PropertyConfig = Record<string, Record<string, unknown>>
+export type PropertyConfig = Record<string, Record<string, unknown>>
+
+type ProfileArg = ResolvedProfile | ResolvedProfileSchema | undefined
+
+function withProfileAdditions(
+  key: Parameters<typeof profilePropertyAdditions>[1],
+  core: PropertyConfig,
+  profile: ProfileArg
+): PropertyConfig {
+  return { ...core, ...profilePropertyAdditions(profile, key) }
+}
+
+function taxonomyOptions(
+  values: readonly string[],
+  color: string = "default"
+): Array<{ name: string; color: string }> {
+  return values.map((name) => ({ name, color }))
+}
 
 // ---------------------------------------------------------------------------
 // Projects Database
@@ -41,27 +64,33 @@ export const PROJECT_PROPS = {
   DESCRIPTION: "Description",
 } as const
 
-export const projectsProperties: PropertyConfig = {
-  [PROJECT_PROPS.NAME]: { title: {} },
-  [PROJECT_PROPS.TYPE]: {
-    select: {
-      options: [
-        { name: "project", color: "blue" },
-        { name: "person", color: "green" },
-        { name: "agent", color: "purple" },
-      ],
+export function projectsProperties(profile?: ProfileArg): PropertyConfig {
+  return withProfileAdditions(
+    "projects",
+    {
+      [PROJECT_PROPS.NAME]: { title: {} },
+      [PROJECT_PROPS.TYPE]: {
+        select: {
+          options: [
+            { name: "project", color: "blue" },
+            { name: "person", color: "green" },
+            { name: "agent", color: "purple" },
+          ],
+        },
+      },
+      [PROJECT_PROPS.PATH]: { rich_text: {} },
+      [PROJECT_PROPS.STATUS]: {
+        select: {
+          options: [
+            { name: "active", color: "green" },
+            { name: "archived", color: "gray" },
+          ],
+        },
+      },
+      [PROJECT_PROPS.DESCRIPTION]: { rich_text: {} },
     },
-  },
-  [PROJECT_PROPS.PATH]: { rich_text: {} },
-  [PROJECT_PROPS.STATUS]: {
-    select: {
-      options: [
-        { name: "active", color: "green" },
-        { name: "archived", color: "gray" },
-      ],
-    },
-  },
-  [PROJECT_PROPS.DESCRIPTION]: { rich_text: {} },
+    profile
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -78,20 +107,27 @@ export const TOPIC_PROPS = {
   DESCRIPTION: "Description",
 } as const
 
-export function topicsProperties(projectsDbId: string): PropertyConfig {
-  return {
-    [TOPIC_PROPS.NAME]: { title: {} },
-    [TOPIC_PROPS.PROJECT]: {
-      relation: {
-        // Many-to-many: a topic can span multiple projects so cross-cutting
-        // concerns (e.g. "GraphQL federation" in a monorepo) accumulate one
-        // topic rather than fragmenting into per-project duplicates.
-        dual_property: {},
-        data_source_id: projectsDbId,
+export function topicsProperties(
+  projectsDbId: string,
+  profile?: ProfileArg
+): PropertyConfig {
+  return withProfileAdditions(
+    "topics",
+    {
+      [TOPIC_PROPS.NAME]: { title: {} },
+      [TOPIC_PROPS.PROJECT]: {
+        relation: {
+          // Many-to-many: a topic can span multiple projects so cross-cutting
+          // concerns (e.g. "GraphQL federation" in a monorepo) accumulate one
+          // topic rather than fragmenting into per-project duplicates.
+          dual_property: {},
+          data_source_id: projectsDbId,
+        },
       },
+      [TOPIC_PROPS.DESCRIPTION]: { rich_text: {} },
     },
-    [TOPIC_PROPS.DESCRIPTION]: { rich_text: {} },
-  }
+    profile
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +207,8 @@ export const MEMORY_PROPS = {
 export function memoriesProperties(
   projectsDbId: string,
   topicsDbId: string,
-  memoriesDsId?: string
+  memoriesDsId?: string,
+  profile?: ProfileArg
 ): PropertyConfig {
   const base: PropertyConfig = {
     [MEMORY_PROPS.TITLE]: { title: {} },
@@ -304,7 +341,12 @@ export function memoriesProperties(
     [MEMORY_PROPS.CONSEQUENCES]: { rich_text: {} },
     [MEMORY_PROPS.AUTHOR]: { rich_text: {} },
     [MEMORY_PROPS.AGENT]: { rich_text: {} },
-    [MEMORY_PROPS.TAGS]: { multi_select: { options: [] } },
+    [MEMORY_PROPS.TAGS]: {
+      multi_select: {
+        options:
+          profile && "taxonomy" in profile ? taxonomyOptions(profile.taxonomy.tags) : [],
+      },
+    },
     // Free-form companion to Tags: PR numbers, ticket IDs, file paths, class
     // or function names — anything too point-in-time to belong in the closed
     // tag vocabulary. Indexed by Notion's text search.
@@ -396,7 +438,7 @@ export function memoriesProperties(
     }
   }
 
-  return base
+  return withProfileAdditions("memories", base, profile)
 }
 
 /**
@@ -466,51 +508,59 @@ export const ENTITY_PROPS = {
  */
 export function entitiesProperties(
   projectsDbId: string,
-  memoriesDbId: string
+  memoriesDbId: string,
+  profile?: ProfileArg
 ): PropertyConfig {
-  return {
-    [ENTITY_PROPS.NAME]: { title: {} },
-    [ENTITY_PROPS.ALIASES]: { rich_text: {} },
-    [ENTITY_PROPS.KIND]: {
-      select: {
-        options: [
-          { name: "class", color: "blue" },
-          { name: "function", color: "green" },
-          { name: "file", color: "yellow" },
-          { name: "workflow", color: "purple" },
-          { name: "pr", color: "orange" },
-          { name: "task-id", color: "red" },
-          { name: "person", color: "pink" },
-          { name: "system", color: "gray" },
-        ],
+  return withProfileAdditions(
+    "entities",
+    {
+      [ENTITY_PROPS.NAME]: { title: {} },
+      [ENTITY_PROPS.ALIASES]: { rich_text: {} },
+      [ENTITY_PROPS.KIND]: {
+        select: {
+          options:
+            profile && "taxonomy" in profile
+              ? taxonomyOptions(profile.taxonomy.entityKinds)
+              : [
+                  { name: "class", color: "blue" },
+                  { name: "function", color: "green" },
+                  { name: "file", color: "yellow" },
+                  { name: "workflow", color: "purple" },
+                  { name: "pr", color: "orange" },
+                  { name: "task-id", color: "red" },
+                  { name: "person", color: "pink" },
+                  { name: "system", color: "gray" },
+                ],
+        },
+      },
+      [ENTITY_PROPS.DESCRIPTION]: { rich_text: {} },
+      [ENTITY_PROPS.PROJECT]: {
+        relation: {
+          // Many-to-many: a class or workflow may span the same set of
+          // projects its referencing facts span (e.g. "AuthMiddleware"
+          // touches every project that imports it). Mirroring Topics'
+          // dual-property keeps cross-project entities reachable from
+          // either side without fragmenting the graph.
+          dual_property: {},
+          data_source_id: projectsDbId,
+        },
+      },
+      /**
+       * Memory rows that defined or first introduced this entity. Optional
+       * — the migration leaves it empty because the source memory for
+       * pre-PF3-01 rows lives on the Fact's Source relation. Used by future
+       * tools that want to surface "where did this entity first appear"
+       * without walking every fact.
+       */
+      [ENTITY_PROPS.SOURCE]: {
+        relation: {
+          single_property: {},
+          data_source_id: memoriesDbId,
+        },
       },
     },
-    [ENTITY_PROPS.DESCRIPTION]: { rich_text: {} },
-    [ENTITY_PROPS.PROJECT]: {
-      relation: {
-        // Many-to-many: a class or workflow may span the same set of
-        // projects its referencing facts span (e.g. "AuthMiddleware"
-        // touches every project that imports it). Mirroring Topics'
-        // dual-property keeps cross-project entities reachable from
-        // either side without fragmenting the graph.
-        dual_property: {},
-        data_source_id: projectsDbId,
-      },
-    },
-    /**
-     * Memory rows that defined or first introduced this entity. Optional
-     * — the migration leaves it empty because the source memory for
-     * pre-PF3-01 rows lives on the Fact's Source relation. Used by future
-     * tools that want to surface "where did this entity first appear"
-     * without walking every fact.
-     */
-    [ENTITY_PROPS.SOURCE]: {
-      relation: {
-        single_property: {},
-        data_source_id: memoriesDbId,
-      },
-    },
-  }
+    profile
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -570,159 +620,167 @@ export const FACT_PROPS = {
 export function factsProperties(
   projectsDbId: string,
   memoriesDbId: string,
-  entitiesDsId: string
+  entitiesDsId: string,
+  profile?: ProfileArg
 ): PropertyConfig {
-  return {
-    [FACT_PROPS.SUBJECT]: { title: {} },
-    [FACT_PROPS.PREDICATE]: {
-      select: {
-        options: [
-          { name: "is_a", color: "blue" },
-          { name: "has_a", color: "green" },
-          { name: "uses", color: "yellow" },
-          { name: "depends_on", color: "orange" },
-          { name: "related_to", color: "pink" },
-          { name: "created_by", color: "purple" },
-          { name: "owned_by", color: "red" },
-          { name: "replaces", color: "gray" },
-          { name: "extends", color: "brown" },
-          { name: "conflicts_with", color: "red" },
-          { name: "needs_action", color: "red" },
-          { name: "waiting_on", color: "orange" },
-          { name: "blocked_by", color: "red" },
-          // Decision-graph predicates. Created exclusively by
-          // DecisionService / `lore-decision action='create'` — not
-          // exposed through `lore-fact action='create'`.
-          { name: "decided_by", color: "blue" },
-          { name: "supersedes_decision", color: "gray" },
-          { name: "informs", color: "pink" },
-          // Auto-emitted by `lore-memory action='save'`.
-          // System-managed, regex-derived; not exposed through
-          // `lore-fact action='create'`. Distinguished from the
-          // agent-curated relationship predicates (uses / depends_on /
-          // is_a / etc.) so retrieval can prefer the higher-quality
-          // explicit edges when both exist.
-          { name: "mentions", color: "gray" },
-        ],
+  return withProfileAdditions(
+    "facts",
+    {
+      [FACT_PROPS.SUBJECT]: { title: {} },
+      [FACT_PROPS.PREDICATE]: {
+        select: {
+          options:
+            profile && "taxonomy" in profile
+              ? taxonomyOptions(factPredicateSchemaOptions(profile))
+              : [
+                  { name: "is_a", color: "blue" },
+                  { name: "has_a", color: "green" },
+                  { name: "uses", color: "yellow" },
+                  { name: "depends_on", color: "orange" },
+                  { name: "related_to", color: "pink" },
+                  { name: "created_by", color: "purple" },
+                  { name: "owned_by", color: "red" },
+                  { name: "replaces", color: "gray" },
+                  { name: "extends", color: "brown" },
+                  { name: "conflicts_with", color: "red" },
+                  { name: "needs_action", color: "red" },
+                  { name: "waiting_on", color: "orange" },
+                  { name: "blocked_by", color: "red" },
+                  // Decision-graph predicates. Created exclusively by
+                  // DecisionService / `lore-decision action='create'` — not
+                  // exposed through `lore-fact action='create'`.
+                  { name: "decided_by", color: "blue" },
+                  { name: "supersedes_decision", color: "gray" },
+                  { name: "informs", color: "pink" },
+                  // Auto-emitted by `lore-memory action='save'`.
+                  // System-managed, regex-derived; not exposed through
+                  // `lore-fact action='create'`. Distinguished from the
+                  // agent-curated relationship predicates (uses / depends_on /
+                  // is_a / etc.) so retrieval can prefer the higher-quality
+                  // explicit edges when both exist.
+                  { name: "mentions", color: "gray" },
+                ],
+        },
       },
-    },
-    [FACT_PROPS.OBJECT]: { rich_text: {} },
-    [FACT_PROPS.PROJECT]: {
-      relation: {
-        single_property: {},
-        data_source_id: projectsDbId,
+      [FACT_PROPS.OBJECT]: { rich_text: {} },
+      [FACT_PROPS.PROJECT]: {
+        relation: {
+          single_property: {},
+          data_source_id: projectsDbId,
+        },
       },
-    },
-    [FACT_PROPS.VALID_FROM]: { date: {} },
-    [FACT_PROPS.VALID_UNTIL]: { date: {} },
-    // Transaction-time provenance columns. System-managed at
-    // write boundaries (`FactService.create` seeds `Observed At` from `today`;
-    // `FactService.invalidate` writes `Invalidated At` alongside the
-    // `Valid Until` flip). Read paths can use these for as-of recall
-    // (`lore-query action='ask'` with `asOf` / `includeHistory`).
-    [FACT_PROPS.OBSERVED_AT]: { date: {} },
-    [FACT_PROPS.INVALIDATED_AT]: { date: {} },
-    [FACT_PROPS.INVALIDATED_BY]: {
-      relation: {
-        single_property: {},
-        data_source_id: memoriesDbId,
+      [FACT_PROPS.VALID_FROM]: { date: {} },
+      [FACT_PROPS.VALID_UNTIL]: { date: {} },
+      // Transaction-time provenance columns. System-managed at
+      // write boundaries (`FactService.create` seeds `Observed At` from `today`;
+      // `FactService.invalidate` writes `Invalidated At` alongside the
+      // `Valid Until` flip). Read paths can use these for as-of recall
+      // (`lore-query action='ask'` with `asOf` / `includeHistory`).
+      [FACT_PROPS.OBSERVED_AT]: { date: {} },
+      [FACT_PROPS.INVALIDATED_AT]: { date: {} },
+      [FACT_PROPS.INVALIDATED_BY]: {
+        relation: {
+          single_property: {},
+          data_source_id: memoriesDbId,
+        },
       },
-    },
-    [FACT_PROPS.REVIEW_BY]: { date: {} },
-    [FACT_PROPS.SOURCE]: {
-      relation: {
-        single_property: {},
-        data_source_id: memoriesDbId,
+      [FACT_PROPS.REVIEW_BY]: { date: {} },
+      [FACT_PROPS.SOURCE]: {
+        relation: {
+          single_property: {},
+          data_source_id: memoriesDbId,
+        },
       },
-    },
-    [FACT_PROPS.CONFIDENCE]: {
-      select: {
-        options: [
-          { name: "certain", color: "green" },
-          { name: "likely", color: "yellow" },
-          { name: "speculative", color: "orange" },
-        ],
+      [FACT_PROPS.CONFIDENCE]: {
+        select: {
+          options: [
+            { name: "certain", color: "green" },
+            { name: "likely", color: "yellow" },
+            { name: "speculative", color: "orange" },
+          ],
+        },
       },
-    },
-    // System-managed numeric confidence in [0, 1] mirroring the Memories
-    // DB column. Distinct from the categorical `Confidence`
-    // select above (agent-curated semantic stance). Bumped on read-citation
-    // via `FactService.touchOnRead`; decremented inside `FactService.invalidate`
-    // alongside the `Valid Until` flip so the same atomic write closes the
-    // contradiction signal. Empty until first touch — `pageToFact` returns
-    // `null` when missing so the RRF integration in `lore-ask` distinguishes
-    // "never scored" from "scored zero." (DEFERRED-02.)
-    [FACT_PROPS.CONFIDENCE_SCORE]: { number: { format: "number" } },
-    // System-managed read-citation timestamp; distinct from
-    // `last_edited_time` which tracks writes. Written by
-    // `FactService.touchOnRead` and `FactService.invalidate` (via
-    // `decrementConfidence`), read by the decay function. Mirrors the
-    // Memories DB column. (DEFERRED-02.)
-    [FACT_PROPS.LAST_REFERENCED_AT]: { date: {} },
-    // Normalized `subject␟predicate␟object` key used by `FactService.create`
-    // to coalesce cosmetic duplicates (case, whitespace, trailing punctuation)
-    // into a single row. Pre-migration pages have this blank; the migrate
-    // command backfills it.
-    [FACT_PROPS.DEDUP_KEY]: { rich_text: {} },
-    // Lowercased + whitespace-collapsed form of `Subject`, used by
-    // `FactService.queryBySubject` for case-insensitive matching.
-    // Pre-migration rows have this blank; `lore migrate --dedup-keys`
-    // backfills it. Distinct from `DedupKey` (a hash) because we need
-    // `contains` substring matching, which Notion doesn't run against
-    // hashed values.
-    [FACT_PROPS.SUBJECT_KEY]: { rich_text: {} },
-    // Canonical entity relation columns. Filled by the build-entities
-    // migration and by `lore-fact action='create'` after the resolver
-    // picks an Entity row. Unbackfilled rows have empty relations; queries
-    // that filter by entity ID fall back to the SubjectKey path on those
-    // rows.
-    [FACT_PROPS.SUBJECT_ENTITY]: {
-      relation: {
-        single_property: {},
-        data_source_id: entitiesDsId,
+      // System-managed numeric confidence in [0, 1] mirroring the Memories
+      // DB column. Distinct from the categorical `Confidence`
+      // select above (agent-curated semantic stance). Bumped on read-citation
+      // via `FactService.touchOnRead`; decremented inside `FactService.invalidate`
+      // alongside the `Valid Until` flip so the same atomic write closes the
+      // contradiction signal. Empty until first touch — `pageToFact` returns
+      // `null` when missing so the RRF integration in `lore-ask` distinguishes
+      // "never scored" from "scored zero." (DEFERRED-02.)
+      [FACT_PROPS.CONFIDENCE_SCORE]: { number: { format: "number" } },
+      // System-managed read-citation timestamp; distinct from
+      // `last_edited_time` which tracks writes. Written by
+      // `FactService.touchOnRead` and `FactService.invalidate` (via
+      // `decrementConfidence`), read by the decay function. Mirrors the
+      // Memories DB column. (DEFERRED-02.)
+      [FACT_PROPS.LAST_REFERENCED_AT]: { date: {} },
+      // Normalized `subject␟predicate␟object` key used by `FactService.create`
+      // to coalesce cosmetic duplicates (case, whitespace, trailing punctuation)
+      // into a single row. Pre-migration pages have this blank; the migrate
+      // command backfills it.
+      [FACT_PROPS.DEDUP_KEY]: { rich_text: {} },
+      // Lowercased + whitespace-collapsed form of `Subject`, used by
+      // `FactService.queryBySubject` for case-insensitive matching.
+      // Pre-migration rows have this blank; `lore migrate --dedup-keys`
+      // backfills it. Distinct from `DedupKey` (a hash) because we need
+      // `contains` substring matching, which Notion doesn't run against
+      // hashed values.
+      [FACT_PROPS.SUBJECT_KEY]: { rich_text: {} },
+      // Canonical entity relation columns. Filled by the build-entities
+      // migration and by `lore-fact action='create'` after the resolver
+      // picks an Entity row. Unbackfilled rows have empty relations; queries
+      // that filter by entity ID fall back to the SubjectKey path on those
+      // rows.
+      [FACT_PROPS.SUBJECT_ENTITY]: {
+        relation: {
+          single_property: {},
+          data_source_id: entitiesDsId,
+        },
       },
-    },
-    [FACT_PROPS.OBJECT_ENTITY]: {
-      relation: {
-        single_property: {},
-        data_source_id: entitiesDsId,
+      [FACT_PROPS.OBJECT_ENTITY]: {
+        relation: {
+          single_property: {},
+          data_source_id: entitiesDsId,
+        },
       },
-    },
-    // Scope / lifetime. Select option lists mirror the
-    // Memories DB columns one-for-one — a scope expansion in
-    // `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` flows to both DBs by
-    // updating both schema builders in lockstep. The schema-drift test
-    // pins the option set against the enums.
-    [FACT_PROPS.SCOPE_KIND]: {
-      select: {
-        options: [
-          { name: "team", color: "blue" },
-          { name: "project", color: "green" },
-          { name: "user", color: "yellow" },
-          { name: "agent", color: "purple" },
-          { name: "role", color: "orange" },
-          { name: "session", color: "pink" },
-          { name: "run", color: "red" },
-          { name: "environment", color: "brown" },
-          { name: "global", color: "gray" },
-        ],
+      // Scope / lifetime. Select option lists mirror the
+      // Memories DB columns one-for-one — a scope expansion in
+      // `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` flows to both DBs by
+      // updating both schema builders in lockstep. The schema-drift test
+      // pins the option set against the enums.
+      [FACT_PROPS.SCOPE_KIND]: {
+        select: {
+          options: [
+            { name: "team", color: "blue" },
+            { name: "project", color: "green" },
+            { name: "user", color: "yellow" },
+            { name: "agent", color: "purple" },
+            { name: "role", color: "orange" },
+            { name: "session", color: "pink" },
+            { name: "run", color: "red" },
+            { name: "environment", color: "brown" },
+            { name: "global", color: "gray" },
+          ],
+        },
       },
-    },
-    [FACT_PROPS.SCOPE_KEY]: { rich_text: {} },
-    [FACT_PROPS.AUDIENCE]: { rich_text: {} },
-    [FACT_PROPS.LIFETIME]: {
-      select: {
-        options: [
-          { name: "persistent", color: "default" },
-          { name: "expires", color: "yellow" },
-          { name: "session-only", color: "pink" },
-          { name: "until-task-closed", color: "orange" },
-          { name: "until-decision-superseded", color: "blue" },
-        ],
+      [FACT_PROPS.SCOPE_KEY]: { rich_text: {} },
+      [FACT_PROPS.AUDIENCE]: { rich_text: {} },
+      [FACT_PROPS.LIFETIME]: {
+        select: {
+          options: [
+            { name: "persistent", color: "default" },
+            { name: "expires", color: "yellow" },
+            { name: "session-only", color: "pink" },
+            { name: "until-task-closed", color: "orange" },
+            { name: "until-decision-superseded", color: "blue" },
+          ],
+        },
       },
+      [FACT_PROPS.EXPIRES_AT]: { date: {} },
     },
-    [FACT_PROPS.EXPIRES_AT]: { date: {} },
-  }
+    profile
+  )
 }
 
 // ---------------------------------------------------------------------------

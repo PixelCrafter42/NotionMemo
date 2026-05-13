@@ -224,16 +224,21 @@ async function resolveProjectIdForRead(
     listHint: PROJECT_LIST_HINT,
   })
   if (explicit !== undefined) {
-    const found = await resolveProjectScopeName(services.projects, explicit, "--project", {
-      listHint: PROJECT_LIST_HINT,
-    })
+    const found = await resolveProjectScopeName(
+      services.projects,
+      explicit,
+      "--project",
+      {
+        listHint: PROJECT_LIST_HINT,
+      }
+    )
     return found.id
   }
   return services.context.project?.id
 }
 
 /**
- * Validate `--tags` against the closed `TAG_VOCABULARY` so the CLI
+ * Validate `--tags` against the active profile vocabulary so the CLI
  * fails at the boundary the same way the MCP `tagsSchema` does. Without
  * this gate, an unknown tag would otherwise reach the `pages.update`
  * `multi_select` write and surface as a generic Notion 400, NOT the
@@ -243,7 +248,8 @@ async function resolveProjectIdForRead(
  */
 function parseTagsList(
   raw: string | undefined,
-  flag: string
+  flag: string,
+  vocabulary: readonly string[] = TAG_VOCABULARY
 ): CliParseResult<string[] | undefined> {
   if (raw === undefined) return { ok: true, value: undefined }
   const tags = raw
@@ -251,7 +257,7 @@ function parseTagsList(
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0)
   if (tags.length === 0) return { ok: true, value: undefined }
-  const vocab = new Set<string>(TAG_VOCABULARY)
+  const vocab = new Set<string>(vocabulary)
   const invalid = tags.filter((tag) => !vocab.has(tag))
   if (invalid.length > 0) {
     const quoted = invalid.map((tag) => `"${tag}"`).join(", ")
@@ -259,7 +265,7 @@ function parseTagsList(
       ok: false,
       message:
         `${flag} value${invalid.length === 1 ? "" : "s"} ${quoted} not in the closed tag vocabulary. ` +
-        `Accepted tags: ${TAG_VOCABULARY.join(", ")}. ` +
+        `Accepted tags: ${vocabulary.join(", ")}. ` +
         `For free-form labels (PR numbers, ticket IDs, file paths, class/function names), ` +
         `use --keywords instead.`,
     }
@@ -432,7 +438,8 @@ export function parseCreateCliOptions(
     tags?: string
     keywords?: string
     synopsis?: string
-  }
+  },
+  tagVocabulary: readonly string[] = TAG_VOCABULARY
 ): CliParseResult<CreateCliOptions> {
   if (!subject.trim()) {
     return { ok: false, message: "<subject> must be a non-empty string" }
@@ -441,7 +448,7 @@ export function parseCreateCliOptions(
   if (!state.ok) return state
   const dueDate = validateYmd(raw.dueDate, "--due-date")
   if (!dueDate.ok) return dueDate
-  const tags = parseTagsList(raw.tags, "--tags")
+  const tags = parseTagsList(raw.tags, "--tags", tagVocabulary)
   if (!tags.ok) return tags
   // Cross-field rule matches the MCP handler's `isUnusableBlockerLabel`
   // guard: a `blocked` task without a meaningful blocker label is
@@ -501,9 +508,14 @@ export async function runTaskCreate(
     listHint: PROJECT_LIST_HINT,
   })
   if (explicit !== undefined) {
-    const found = await resolveProjectScopeName(services.projects, explicit, "--project", {
-      listHint: PROJECT_LIST_HINT,
-    })
+    const found = await resolveProjectScopeName(
+      services.projects,
+      explicit,
+      "--project",
+      {
+        listHint: PROJECT_LIST_HINT,
+      }
+    )
     projectId = found.id
     projectLabel = found.name
   } else if (services.context.project) {
@@ -778,7 +790,8 @@ export function parseUpdateCliOptions(
     tags?: string
     keywords?: string
     synopsis?: string
-  }
+  },
+  tagVocabulary: readonly string[] = TAG_VOCABULARY
 ): CliParseResult<UpdateCliOptions> {
   if (!taskId.trim()) {
     return { ok: false, message: "<task-id> must be a non-empty string" }
@@ -787,7 +800,7 @@ export function parseUpdateCliOptions(
   if (!state.ok) return state
   const dueDate = validateClearableYmd(raw.dueDate, "--due-date")
   if (!dueDate.ok) return dueDate
-  const tags = parseTagsList(raw.tags, "--tags")
+  const tags = parseTagsList(raw.tags, "--tags", tagVocabulary)
   if (!tags.ok) return tags
   // Mirror MCP's `isUnusableBlockerLabel` guard: transitioning into
   // `blocked` must restate a meaningful blocker label even if the row
@@ -854,8 +867,7 @@ export async function runTaskUpdate(
       title: updated.title,
       state: (updated.taskState ?? "open") as TaskState,
       projectIds: updated.projectIds,
-      entity:
-        updated.entity && updated.entity !== updated.title ? updated.entity : null,
+      entity: updated.entity && updated.entity !== updated.title ? updated.entity : null,
       reviewBy: updated.reviewBy ?? null,
       blockedBy: updated.blockedBy || null,
     },
@@ -871,10 +883,7 @@ const updateCommand = new Command("update")
     "Blocker label (pass empty string to clear; required with --state=blocked)"
   )
   .option("--entity <name>", "Rename the task's entity")
-  .option(
-    "--due-date <yyyy-mm-dd>",
-    "New due date (pass empty string to clear)"
-  )
+  .option("--due-date <yyyy-mm-dd>", "New due date (pass empty string to clear)")
   .option("--subject <text>", "New subject (page title)")
   .option("-d, --description <text>", "Replace the description body")
   .option(

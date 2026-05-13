@@ -8,6 +8,7 @@
 import type { Client } from "@notionhq/client"
 import type { BlockObjectResponse } from "@notionhq/client"
 import type { DatabaseRef, Vault, VaultDatabases } from "../types.js"
+import { resolveProfileFromConfig, type ResolvedProfile } from "../profile/index.js"
 import {
   ENTITY_PROPS,
   FACT_PROPS,
@@ -234,11 +235,12 @@ function createDbArgs(
  */
 export async function createVaultDatabases(
   client: Client,
-  pageId: string
+  pageId: string,
+  profile: ResolvedProfile = resolveProfileFromConfig({})
 ): Promise<Vault> {
   // 1. Projects (no deps)
   const projectsDb = await client.databases.create(
-    createDbArgs(pageId, PROJECTS_DB_TITLE, PROJECTS_DB_ICON, projectsProperties)
+    createDbArgs(pageId, PROJECTS_DB_TITLE, PROJECTS_DB_ICON, projectsProperties(profile))
   )
 
   // 2. Topics (depends on Projects)
@@ -247,7 +249,10 @@ export async function createVaultDatabases(
       pageId,
       TOPICS_DB_TITLE,
       TOPICS_DB_ICON,
-      topicsProperties(getDataSourceId(projectsDb as unknown as Record<string, unknown>))
+      topicsProperties(
+        getDataSourceId(projectsDb as unknown as Record<string, unknown>),
+        profile
+      )
     )
   )
 
@@ -261,7 +266,9 @@ export async function createVaultDatabases(
       MEMORIES_DB_ICON,
       memoriesProperties(
         getDataSourceId(projectsDb as unknown as Record<string, unknown>),
-        getDataSourceId(topicsDb as unknown as Record<string, unknown>)
+        getDataSourceId(topicsDb as unknown as Record<string, unknown>),
+        undefined,
+        profile
       )
     )
   )
@@ -283,7 +290,8 @@ export async function createVaultDatabases(
       ENTITIES_DB_ICON,
       entitiesProperties(
         getDataSourceId(projectsDb as unknown as Record<string, unknown>),
-        getDataSourceId(memoriesDb as unknown as Record<string, unknown>)
+        getDataSourceId(memoriesDb as unknown as Record<string, unknown>),
+        profile
       )
     )
   )
@@ -300,7 +308,8 @@ export async function createVaultDatabases(
       factsProperties(
         getDataSourceId(projectsDb as unknown as Record<string, unknown>),
         getDataSourceId(memoriesDb as unknown as Record<string, unknown>),
-        getDataSourceId(entitiesDb as unknown as Record<string, unknown>)
+        getDataSourceId(entitiesDb as unknown as Record<string, unknown>),
+        profile
       )
     )
   )
@@ -339,7 +348,7 @@ export type EnsureEntitiesDatabaseResult =
 export async function ensureEntitiesDatabase(
   client: Client,
   vault: VaultWithOptionalEntities,
-  options: { dryRun?: boolean } = {}
+  options: { dryRun?: boolean; profile?: ResolvedProfile } = {}
 ): Promise<EnsureEntitiesDatabaseResult> {
   if (vault.databases.entities) {
     return { status: "present", ref: vault.databases.entities }
@@ -355,7 +364,8 @@ export async function ensureEntitiesDatabase(
     initial_data_source: {
       properties: entitiesProperties(
         vault.databases.projects.dataSourceId,
-        vault.databases.memories.dataSourceId
+        vault.databases.memories.dataSourceId,
+        options.profile ?? resolveProfileFromConfig({})
       ) as Parameters<Client["databases"]["create"]>[0]["initial_data_source"] extends {
         properties?: infer P
       }
@@ -555,8 +565,9 @@ export function computeRelationConfigDiff(
 export async function migrateVaultSchema(
   client: Client,
   vault: Vault,
-  options: { dryRun?: boolean } = {}
+  options: { dryRun?: boolean; profile?: ResolvedProfile } = {}
 ): Promise<MigrationDiff[]> {
+  const profile = options.profile ?? resolveProfileFromConfig({})
   const db = vault.databases
   const partialDb = db as Partial<VaultDatabases>
   const entitiesDb = partialDb.entities
@@ -570,18 +581,24 @@ export async function migrateVaultSchema(
     throw new MissingVaultDatabasesError(vault.pageId, [ENTITIES_DB_TITLE], present)
   }
   const expectedByDb: Record<keyof VaultDatabases, AnyProperties> = {
-    projects: projectsProperties,
-    topics: topicsProperties(db.projects.dataSourceId),
+    projects: projectsProperties(profile),
+    topics: topicsProperties(db.projects.dataSourceId, profile),
     memories: memoriesProperties(
       db.projects.dataSourceId,
       db.topics.dataSourceId,
-      db.memories.dataSourceId
+      db.memories.dataSourceId,
+      profile
     ),
-    entities: entitiesProperties(db.projects.dataSourceId, db.memories.dataSourceId),
+    entities: entitiesProperties(
+      db.projects.dataSourceId,
+      db.memories.dataSourceId,
+      profile
+    ),
     facts: factsProperties(
       db.projects.dataSourceId,
       db.memories.dataSourceId,
-      entitiesDb.dataSourceId
+      entitiesDb.dataSourceId,
+      profile
     ),
   }
 

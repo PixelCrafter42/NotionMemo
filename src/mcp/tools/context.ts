@@ -61,6 +61,7 @@ import {
   type Memory,
   type TaskSummary,
 } from "../../types.js"
+import { defaultProfileSelector } from "../../profile/index.js"
 import {
   type CollapsedMemoryGroup,
   type MemoryListItem,
@@ -472,9 +473,13 @@ async function handleStatus(services: LoreServices): Promise<ToolResult> {
   try {
     const stats = await services.vault.stats()
     const project = services.context.project
+    const profileLine = services.profile
+      ? `Profile: ${services.profile.name}@${services.profile.version} (${services.profile.source})`
+      : `Profile: ${defaultProfileSelector()} (built-in)`
 
     const lines = [
       `Vault: ${services.context.vault.pageId}`,
+      profileLine,
       `Current project: ${project ? `${project.name} (${project.path || "no path"})` : "none (vault-wide scope)"}`,
       "",
       "Database counts:",

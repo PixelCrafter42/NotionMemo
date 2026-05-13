@@ -289,9 +289,7 @@ describe("runReconcile", () => {
 
     await expect(
       runReconcile(services, { projectName: "Archive", minScore: 0.5, limit: 25 })
-    ).rejects.toThrow(
-      'Project "Archive" could not be resolved because it is archived.'
-    )
+    ).rejects.toThrow('Project "Archive" could not be resolved because it is archived.')
 
     expect(findByName).toHaveBeenNthCalledWith(1, "Archive")
     expect(findByName).toHaveBeenNthCalledWith(2, "Archive", {
@@ -640,6 +638,24 @@ describe("parseCreateCliOptions", () => {
       expect(result.value.tags).toEqual(["frontend", "ios", "ui"])
     }
   })
+
+  it("validates --tags against the supplied profile vocabulary", () => {
+    const accepted = parseCreateCliOptions("subject", { tags: "alpha, beta" }, [
+      "alpha",
+      "beta",
+    ])
+    expect(accepted.ok).toBe(true)
+
+    const rejected = parseCreateCliOptions("subject", { tags: "frontend" }, [
+      "alpha",
+      "beta",
+    ])
+    expect(rejected.ok).toBe(false)
+    if (!rejected.ok) {
+      expect(rejected.message).toContain("alpha, beta")
+      expect(rejected.message).not.toContain("ios")
+    }
+  })
 })
 
 describe("runTaskCreate", () => {
@@ -726,9 +742,9 @@ describe("runTaskCreate", () => {
   })
 
   it("falls back to the auto-detected context project when --project is absent", async () => {
-    const tasksCreate = vi.fn().mockResolvedValue(
-      makeTask({ id: "t-1", title: "subject" }) as unknown as Task
-    )
+    const tasksCreate = vi
+      .fn()
+      .mockResolvedValue(makeTask({ id: "t-1", title: "subject" }) as unknown as Task)
     const services = makeServices({
       contextProject: { id: "ctx-widget", name: "Widget", path: "apps/widget" },
       tasksCreate,
@@ -754,9 +770,9 @@ describe("runTaskCreate", () => {
   })
 
   it("creates the topic via topics.getOrCreate when --topic is provided alongside a project", async () => {
-    const tasksCreate = vi.fn().mockResolvedValue(
-      makeTask({ id: "t-2", title: "subject" }) as unknown as Task
-    )
+    const tasksCreate = vi
+      .fn()
+      .mockResolvedValue(makeTask({ id: "t-2", title: "subject" }) as unknown as Task)
     const topicsGetOrCreate = vi
       .fn()
       .mockResolvedValue({ id: "topic-ship", name: "ship-it" })
@@ -788,9 +804,9 @@ describe("runTaskCreate", () => {
   })
 
   it("warns when --topic is supplied without a resolvable project", async () => {
-    const tasksCreate = vi.fn().mockResolvedValue(
-      makeTask({ id: "t-3", title: "subject" }) as unknown as Task
-    )
+    const tasksCreate = vi
+      .fn()
+      .mockResolvedValue(makeTask({ id: "t-3", title: "subject" }) as unknown as Task)
     const services = makeServices({ contextProject: null, tasksCreate })
 
     const result = await runTaskCreate(services, {
@@ -980,9 +996,9 @@ describe("runTaskCreate", () => {
       // `[p-other]`. Set-equality fails → no reuse.
       projectIds: ["p-widget"],
     })
-    const tasksCreate = vi.fn().mockResolvedValue(
-      makeTask({ id: "t-fresh", title: "subject" }) as unknown as Task
-    )
+    const tasksCreate = vi
+      .fn()
+      .mockResolvedValue(makeTask({ id: "t-fresh", title: "subject" }) as unknown as Task)
     const tasksList = vi.fn().mockResolvedValue({ items: [existing] })
     const services = {
       ...makeServices({ findByName, contextProject: null, tasksCreate }),
@@ -1365,9 +1381,7 @@ describe("runTaskList", () => {
       limit: 20,
     })
 
-    expect(tasksList).toHaveBeenCalledWith(
-      expect.objectContaining({ states: ["done"] })
-    )
+    expect(tasksList).toHaveBeenCalledWith(expect.objectContaining({ states: ["done"] }))
     expect(result.text).toContain("Done (1):")
   })
 
@@ -1433,10 +1447,7 @@ describe("runTaskList", () => {
     // second asks for the residual `min(100, 100) = 100` and gets back
     // 50 with nextCursor undefined → loop exits with 150 rows.
     expect(tasksList).toHaveBeenCalledTimes(2)
-    expect(tasksList).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ limit: 100 })
-    )
+    expect(tasksList).toHaveBeenNthCalledWith(1, expect.objectContaining({ limit: 100 }))
     expect(tasksList).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ limit: 100, startCursor: "cursor-1" })
@@ -1489,9 +1500,7 @@ describe("runTaskList", () => {
     // wording would push the operator toward narrowing filters when
     // the walk budget was never the binding constraint.
     expect(result.text).not.toContain("listing capped at 500 fetched rows")
-    expect(result.text).not.toContain(
-      "after the first 500 fetched rows"
-    )
+    expect(result.text).not.toContain("after the first 500 fetched rows")
   })
 
   it("prefers safety-cap wording when --limit == MAX_LIST_LIMIT and both terminal conditions fire simultaneously", async () => {
@@ -1603,9 +1612,7 @@ describe("runTaskList", () => {
     // walker fetched zero matching rows. The empty-state message must
     // signal that more rows may exist beyond the cap rather than
     // claiming "no tasks found" outright.
-    const tasksList = vi
-      .fn()
-      .mockResolvedValue({ items: [], nextCursor: "cursor-more" })
+    const tasksList = vi.fn().mockResolvedValue({ items: [], nextCursor: "cursor-more" })
     const services = {
       ...makeServices({ contextProject: null }),
       tasks: { list: tasksList },
@@ -1654,10 +1661,9 @@ describe("tasksCommand create/update/close/list actions", () => {
   })
 
   it("create exits 1 once before initServices on bad --due-date", async () => {
-    await tasksCommand.parseAsync(
-      ["create", "subject", "--due-date", "tomorrow"],
-      { from: "user" }
-    )
+    await tasksCommand.parseAsync(["create", "subject", "--due-date", "tomorrow"], {
+      from: "user",
+    })
 
     const errorText = errorSpy.mock.calls.flat().join("\n")
     expect(errorText).toContain("Task create failed:")
@@ -1701,10 +1707,9 @@ describe("tasksCommand create/update/close/list actions", () => {
   })
 
   it("update exits 1 once before initServices on --state=blocked without --blocked-by", async () => {
-    await tasksCommand.parseAsync(
-      ["update", "task-id", "--state", "blocked"],
-      { from: "user" }
-    )
+    await tasksCommand.parseAsync(["update", "task-id", "--state", "blocked"], {
+      from: "user",
+    })
 
     const errorText = errorSpy.mock.calls.flat().join("\n")
     expect(errorText).toContain("Task update failed:")
@@ -1737,10 +1742,9 @@ describe("tasksCommand create/update/close/list actions", () => {
   })
 
   it("close exits 1 once before initServices on bad --state", async () => {
-    await tasksCommand.parseAsync(
-      ["close", "task-id", "--state", "in-progress"],
-      { from: "user" }
-    )
+    await tasksCommand.parseAsync(["close", "task-id", "--state", "in-progress"], {
+      from: "user",
+    })
 
     const errorText = errorSpy.mock.calls.flat().join("\n")
     expect(errorText).toContain("Task close failed:")
@@ -1843,9 +1847,7 @@ describe("tasksCommand create/update/close/list actions", () => {
   })
 
   it("list --json prints the structured list result with the saturation flag", async () => {
-    const tasksList = vi
-      .fn()
-      .mockResolvedValue({ items: [], nextCursor: undefined })
+    const tasksList = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined })
     const services = {
       ...makeServices({ contextProject: null }),
       tasks: { list: tasksList },
@@ -1906,10 +1908,9 @@ describe("tasksCommand create/update/close/list actions", () => {
     // reach `services.tasks.create` and surface as a generic Notion
     // 400 mid-flight. Pinning the error prefix is the shell-grep
     // contract programmatic consumers rely on.
-    await tasksCommand.parseAsync(
-      ["create", "subject", "--tags", "pr-1234"],
-      { from: "user" }
-    )
+    await tasksCommand.parseAsync(["create", "subject", "--tags", "pr-1234"], {
+      from: "user",
+    })
 
     const errorText = errorSpy.mock.calls.flat().join("\n")
     expect(errorText).toContain("Task create failed:")
@@ -1921,10 +1922,9 @@ describe("tasksCommand create/update/close/list actions", () => {
   })
 
   it("update exits 1 once before initServices on out-of-vocab --tags", async () => {
-    await tasksCommand.parseAsync(
-      ["update", "task-id", "--tags", "pr-1234"],
-      { from: "user" }
-    )
+    await tasksCommand.parseAsync(["update", "task-id", "--tags", "pr-1234"], {
+      from: "user",
+    })
 
     const errorText = errorSpy.mock.calls.flat().join("\n")
     expect(errorText).toContain("Task update failed:")
@@ -1958,14 +1958,7 @@ describe("tasksCommand create/update/close/list actions", () => {
 
   it("update exits 1 once before initServices on --state=blocked --blocked-by '   '", async () => {
     await tasksCommand.parseAsync(
-      [
-        "update",
-        "task-id",
-        "--state",
-        "blocked",
-        "--blocked-by",
-        "   ",
-      ],
+      ["update", "task-id", "--state", "blocked", "--blocked-by", "   "],
       { from: "user" }
     )
 

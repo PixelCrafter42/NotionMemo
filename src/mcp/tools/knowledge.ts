@@ -25,7 +25,13 @@ import { nonBlankString } from "./text-schema.js"
 import { scopeInputSchema } from "./scope-schema.js"
 import { isTransientNotionError } from "../../notion/errors.js"
 
-import type { Decision, Fact, TaskSummary } from "../../types.js"
+import {
+  DEFAULT_WRITABLE_FACT_PREDICATES,
+  GENERIC_FACT_PREDICATES,
+  type Decision,
+  type Fact,
+  type TaskSummary,
+} from "../../types.js"
 import { taskDaysOverdue } from "../../core/task.js"
 import { expandEntityQueryVariants } from "../../core/entity.js"
 import {
@@ -33,6 +39,7 @@ import {
   renderProjectContextLines,
 } from "../../core/project-context.js"
 import { FACT_PROPS } from "../../notion/schema.js"
+import { writableFactPredicates } from "../../profile/index.js"
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>
@@ -74,19 +81,6 @@ const SUGGESTED_OVERFLOW_LIMIT = 20
  * lowest-quality fallback and is intentionally not addressable as an
  * agent-curated value.
  */
-const PREDICATE_VALUES = [
-  "is_a",
-  "has_a",
-  "uses",
-  "depends_on",
-  "related_to",
-  "created_by",
-  "owned_by",
-  "replaces",
-  "extends",
-  "conflicts_with",
-] as const
-
 const CONFIDENCES = ["certain", "likely", "speculative"] as const
 
 /**
@@ -121,7 +115,7 @@ function debugLogFactPrecheckRejected(
     | "provenance-source-unresolved"
     | "provenance-source-cross-project",
   args: Pick<LearnArgs, "agent" | "session" | "sourceMemoryId">,
-  factProjectIds: string[],
+  factProjectIds: string[]
 ): void {
   if (process.env["LORE_DEBUG"] !== "1") return
   const clean = (value: string | undefined): string =>
@@ -129,11 +123,12 @@ function debugLogFactPrecheckRejected(
       const code = char.charCodeAt(0)
       return code <= 31 || code === 127 ? " " : char
     }).join("")
-  const projectScope = factProjectIds.length > 0 ? factProjectIds.join(",") : "<vault-wide>"
+  const projectScope =
+    factProjectIds.length > 0 ? factProjectIds.join(",") : "<vault-wide>"
   process.stderr.write(
     `[lore] fact-precheck-rejected: reason=${reason} ` +
       `agent=${clean(args.agent)} session=${clean(args.session)} ` +
-      `sourceMemoryId=${clean(args.sourceMemoryId)} project=${projectScope}\n`,
+      `sourceMemoryId=${clean(args.sourceMemoryId)} project=${projectScope}\n`
   )
 }
 
@@ -331,7 +326,7 @@ function collectAskSourceMemoryIds(
 
 interface LearnArgs {
   subject: string
-  predicate: (typeof PREDICATE_VALUES)[number]
+  predicate: string
   object: string
   projectName?: string
   projectNames?: string[]
@@ -370,21 +365,28 @@ export async function handleLearn(
         return toolError(
           new Error(
             `provenance-source-unresolved: sourceMemoryId ${effectiveSource} did not resolve to a live Memories row. ` +
-              `Pass an existing supporting memory ID, or pass agent+session for session auto-link.`,
-          ),
+              `Pass an existing supporting memory ID, or pass agent+session for session auto-link.`
+          )
         )
       }
       if (!projectsCompatible(factProjectIds, sourceProjectIds)) {
-        debugLogFactPrecheckRejected("provenance-source-cross-project", args, factProjectIds)
+        debugLogFactPrecheckRejected(
+          "provenance-source-cross-project",
+          args,
+          factProjectIds
+        )
         return toolError(
           new Error(
             `provenance-source-cross-project: sourceMemoryId ${effectiveSource} is scoped to a different project than this fact. ` +
-              `Use a source memory from the same project, or a vault-wide source memory.`,
-          ),
+              `Use a source memory from the same project, or a vault-wide source memory.`
+          )
         )
       }
     } else {
-      const candidate = services.sessionMemories.get({ agent: args.agent, session: args.session })
+      const candidate = services.sessionMemories.get({
+        agent: args.agent,
+        session: args.session,
+      })
       if (candidate) {
         if (projectsCompatible(factProjectIds, candidate.projectIds)) {
           effectiveSource = candidate.memoryId
@@ -395,8 +397,8 @@ export async function handleLearn(
             new Error(
               `provenance-cross-project: lore-fact create requires a compatible source memory. ` +
                 `Session memory ${candidate.memoryId} is scoped to a different project than this fact. ` +
-                `Pass sourceMemoryId explicitly to override the session candidate.`,
-            ),
+                `Pass sourceMemoryId explicitly to override the session candidate.`
+            )
           )
         }
       }
@@ -408,8 +410,8 @@ export async function handleLearn(
         new Error(
           "provenance-unresolved: agent+session did not resolve to a compatible session memory. " +
             "Pass sourceMemoryId with an existing supporting memory, or save a memory/decision " +
-            "under the same agent+session before creating the fact.",
-        ),
+            "under the same agent+session before creating the fact."
+        )
       )
     }
 
@@ -1304,65 +1306,88 @@ export async function handleAudit(
   }
 }
 
-const factDispatchSchema = z
-  .discriminatedUnion("action", [
-    z.object({
-      action: z.literal("create"),
-      // Reject empty / whitespace-only subject and object at the
-      // boundary; write-path symmetric with the read-path guard. An empty
-      // / whitespace-only triple would land in `createWithDedup`,
-      // hash through `normalize("")` into `DedupKey`, and persist a
-      // structurally degenerate fact row that confuses downstream
-      // consumers: `queryBySubject` won't surface it, `repointEntity`
-      // sees an empty key, and the dedup probe collides every empty-
-      // subject fact onto one slot. Shared `nonBlankString` matches
-      // the `.trim().min(1)` posture used by `lore-query action='ask'`'s
-      // `entity` schema.
-      subject: nonBlankString,
-      predicate: z.enum(PREDICATE_VALUES),
-      object: nonBlankString,
-      projectName: z.string().optional(),
-      projectNames: z.array(z.string()).optional(),
-      reviewBy: clearableYmdDateSchema.optional(),
-      confidence: z.enum(CONFIDENCES).optional(),
-      sourceMemoryId: z.string().optional(),
-      session: z.string().optional(),
-      agent: z.string().optional(),
-      scope: scopeInputSchema,
-    }),
-    z.object({
-      action: z.literal("invalidate"),
-      factId: z.string(),
-      // Optional invalidation provenance. The memory id
-      // recorded on the fact's `Invalidated By` relation, distinct from
-      // `Source` (creation-time provenance). Optional because operators
-      // sometimes invalidate without a memory to point at (e.g. an
-      // ad-hoc cleanup pass).
-      sourceMemoryId: z.string().optional(),
-    }),
-    z.object({
-      action: z.literal("extend"),
-      factId: z.string(),
-      reviewBy: clearableYmdDateSchema,
-    }),
-  ])
-  .superRefine((args, ctx) => {
-    if (args.action !== "create") return
-    const sourceMemoryId = args.sourceMemoryId?.trim()
-    if (sourceMemoryId) return
-    const agent = args.agent?.trim()
-    const session = args.session?.trim()
-    if (agent && session) return
+function createPredicateSchema(values: readonly string[]) {
+  const accepted = new Set(values)
+  const acceptedList = values.join(" | ")
+  return z.string().superRefine((value, ctx) => {
+    if (accepted.has(value)) return
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ["sourceMemoryId"],
-      message:
-        "provenance-missing: pass a non-empty sourceMemoryId, or pass both non-empty " +
-        "agent and session so Lore can auto-link a compatible session memory.",
+      message: `predicate must be one of ${acceptedList}, got "${value}"`,
     })
   })
+}
+
+function createFactDispatchSchema(
+  predicateSchema: ReturnType<typeof createPredicateSchema>
+) {
+  return z
+    .discriminatedUnion("action", [
+      z.object({
+        action: z.literal("create"),
+        // Reject empty / whitespace-only subject and object at the
+        // boundary; write-path symmetric with the read-path guard. An empty
+        // / whitespace-only triple would land in `createWithDedup`,
+        // hash through `normalize("")` into `DedupKey`, and persist a
+        // structurally degenerate fact row that confuses downstream
+        // consumers: `queryBySubject` won't surface it, `repointEntity`
+        // sees an empty key, and the dedup probe collides every empty-
+        // subject fact onto one slot. Shared `nonBlankString` matches
+        // the `.trim().min(1)` posture used by `lore-query action='ask'`'s
+        // `entity` schema.
+        subject: nonBlankString,
+        predicate: predicateSchema,
+        object: nonBlankString,
+        projectName: z.string().optional(),
+        projectNames: z.array(z.string()).optional(),
+        reviewBy: clearableYmdDateSchema.optional(),
+        confidence: z.enum(CONFIDENCES).optional(),
+        sourceMemoryId: z.string().optional(),
+        session: z.string().optional(),
+        agent: z.string().optional(),
+        scope: scopeInputSchema,
+      }),
+      z.object({
+        action: z.literal("invalidate"),
+        factId: z.string(),
+        // Optional invalidation provenance. The memory id
+        // recorded on the fact's `Invalidated By` relation, distinct from
+        // `Source` (creation-time provenance). Optional because operators
+        // sometimes invalidate without a memory to point at (e.g. an
+        // ad-hoc cleanup pass).
+        sourceMemoryId: z.string().optional(),
+      }),
+      z.object({
+        action: z.literal("extend"),
+        factId: z.string(),
+        reviewBy: clearableYmdDateSchema,
+      }),
+    ])
+    .superRefine((args, ctx) => {
+      if (args.action !== "create") return
+      const sourceMemoryId = args.sourceMemoryId?.trim()
+      if (sourceMemoryId) return
+      const agent = args.agent?.trim()
+      const session = args.session?.trim()
+      if (agent && session) return
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["sourceMemoryId"],
+        message:
+          "provenance-missing: pass a non-empty sourceMemoryId, or pass both non-empty " +
+          "agent and session so Lore can auto-link a compatible session memory.",
+      })
+    })
+}
 
 export function registerKnowledgeTools(server: McpServer, services: LoreServices): void {
+  const predicateSchema = createPredicateSchema(
+    services.profile
+      ? writableFactPredicates(services.profile)
+      : [...GENERIC_FACT_PREDICATES, ...DEFAULT_WRITABLE_FACT_PREDICATES]
+  )
+  const factDispatchSchema = createFactDispatchSchema(predicateSchema)
+
   // -------------------------------------------------------------------------
   // lore-fact — polymorphic dispatcher
   // -------------------------------------------------------------------------
@@ -1387,7 +1412,8 @@ export function registerKnowledgeTools(server: McpServer, services: LoreServices
           .optional()
           .describe("(action='create') The entity this fact is about."),
         predicate: z
-          .enum(PREDICATE_VALUES)
+          .string()
+          .pipe(predicateSchema)
           .optional()
           .describe("(action='create') The relationship type."),
         object: z
@@ -1411,7 +1437,7 @@ export function registerKnowledgeTools(server: McpServer, services: LoreServices
           .optional()
           .describe(
             "(action='create') ID of the memory that supports this fact. Required unless agent+session auto-links a compatible source memory. " +
-              "(action='invalidate') Optional ID of the memory that prompted the invalidation; recorded in the fact's `Invalidated By` relation.",
+              "(action='invalidate') Optional ID of the memory that prompted the invalidation; recorded in the fact's `Invalidated By` relation."
           ),
         session: z
           .string()
@@ -1448,15 +1474,15 @@ export function registerKnowledgeTools(server: McpServer, services: LoreServices
       switch (data.action) {
         case "create":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleLearn(services, data),
+            handleLearn(services, data)
           )
         case "invalidate":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleInvalidate(services, data),
+            handleInvalidate(services, data)
           )
         case "extend":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleExtendFact(services, data),
+            handleExtendFact(services, data)
           )
       }
     }

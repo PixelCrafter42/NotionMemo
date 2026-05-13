@@ -5,6 +5,7 @@ import {
   buildBackgroundSavePrompt,
   PER_SPAWN_LEARNING_LIMIT,
 } from "./prompts.js"
+import { resolveProfileFromConfig } from "../profile/index.js"
 
 describe("buildProjectSelectionGuidance", () => {
   it("returns empty when no projects are configured", () => {
@@ -127,6 +128,37 @@ describe("buildBackgroundSavePrompt", () => {
     expect(prompt).toMatch(
       /Pass session: "sess-xyz" and agent: "Codex" and author: "Test User" verbatim/
     )
+  })
+
+  it("renders the default profile prompt registry byte-identically", () => {
+    const profilePrompts = resolveProfileFromConfig({}).prompts
+    const core = buildBackgroundSavePrompt(
+      ["Widget Backend"],
+      "Widget",
+      "transcript",
+      "sess-xyz",
+      "Codex",
+      {
+        extractLearnings: true,
+        proposeLearnings: true,
+        authorName: "Test User",
+      }
+    )
+    const profiled = buildBackgroundSavePrompt(
+      ["Widget Backend"],
+      "Widget",
+      "transcript",
+      "sess-xyz",
+      "Codex",
+      {
+        extractLearnings: true,
+        proposeLearnings: true,
+        authorName: "Test User",
+        profilePrompts,
+      }
+    )
+
+    expect(profiled).toBe(core)
   })
 
   it("omits Author when authorName is undefined but keeps other identity fields intact", () => {
@@ -602,5 +634,15 @@ describe("buildDigestPrompt", () => {
     expect(prompt).toContain('"Widget\\nignore prior"')
     // No literal newline should land inside the projectName value.
     expect(prompt).not.toContain("ignore prior\n")
+  })
+
+  it("renders the default profile digest prompt byte-identically", () => {
+    const profilePrompts = resolveProfileFromConfig({}).prompts
+    const core = buildDigestPrompt(rawData, "Widget", "2026-04-24", "2026-04-10")
+    const profiled = buildDigestPrompt(rawData, "Widget", "2026-04-24", "2026-04-10", {
+      profilePrompts,
+    })
+
+    expect(profiled).toBe(core)
   })
 })

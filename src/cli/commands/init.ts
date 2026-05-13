@@ -18,6 +18,7 @@ import {
   type NtnEnv,
 } from "../../auth/ntn.js"
 import type { LoreConfig } from "../../types.js"
+import { defaultProfileSelector, resolveProfileFromConfig } from "../../profile/index.js"
 import {
   buildHookDisclosureLines as buildHookDisclosureLinesShared,
   buildHookYamlCommentBefore,
@@ -54,6 +55,7 @@ export const buildHookDisclosureLines = buildHookDisclosureLinesShared
 export function buildInitConfigYaml(pageId: string, workspaceId?: string): string {
   const config: LoreConfig = {
     vault: { pageId },
+    profile: defaultProfileSelector(),
     ...(workspaceId !== undefined && {
       auth: { workspaceId },
     }),
@@ -318,7 +320,8 @@ export async function runExplicitPageInit(
     process.exit(1)
   }
 
-  const vault = new VaultManager(client, pageId)
+  const profile = resolveProfileFromConfig({})
+  const vault = new VaultManager(client, pageId, profile)
 
   console.log("Creating Lore databases in Notion...")
 
@@ -705,7 +708,8 @@ export async function runNoArgInit(opts: {
 
   // Create the five databases under the vault page.
   console.log("Creating Lore databases...")
-  const vault = new VaultManager(client, vaultPageId)
+  const profile = resolveProfileFromConfig({})
+  const vault = new VaultManager(client, vaultPageId, profile)
   try {
     const result = await vault.init()
     console.log(`  ✓ Projects DB: ${result.databases.projects}`)

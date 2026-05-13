@@ -18,7 +18,8 @@
   },
   "files": [
     "dist",
-    "hooks"
+    "hooks",
+    "profiles"
   ],
   "scripts": {
     "build": "tsup",

@@ -23,10 +23,7 @@ import {
   type ClientAuthRefreshOutcome,
   type RefreshClientAuth,
 } from "./notion/client.js"
-import {
-  createLimitedClient,
-  wrapWithWriteBudget,
-} from "./notion/rate-limit.js"
+import { createLimitedClient, wrapWithWriteBudget } from "./notion/rate-limit.js"
 import {
   isRunToolBlockEditEnabled,
   isRunToolEnabled,
@@ -57,6 +54,7 @@ import {
   touchDriftMarker,
 } from "./hooks/drift-marker.js"
 import { SessionMemoryTracker } from "./session-memory-tracker.js"
+import { resolveProfileFromConfig, type ResolvedProfile } from "./profile/index.js"
 import type {
   LoreConfig,
   MemoryScopeContext,
@@ -294,14 +292,12 @@ export function readWriteBudgetEnv(): {
     throw new Error(
       "LORE_MCP_WRITE_BUDGET and LORE_MCP_BUDGET_STATE_FILE must be " +
         "set together. Set both env vars (or none) before starting the " +
-        "MCP server.",
+        "MCP server."
     )
   }
   const limit = Number.parseInt(limitRaw, 10)
   if (!Number.isInteger(limit) || limit <= 0 || String(limit) !== limitRaw) {
-    throw new Error(
-      `LORE_MCP_WRITE_BUDGET must be a positive integer, got "${limitRaw}"`,
-    )
+    throw new Error(`LORE_MCP_WRITE_BUDGET must be a positive integer, got "${limitRaw}"`)
   }
   return { limit, stateFilePath: pathRaw }
 }
@@ -367,6 +363,7 @@ export interface InitServicesOptions {
 }
 
 export interface LoreServices {
+  profile: ResolvedProfile
   /**
    * Shared Notion SDK client for this process. This is the same
    * auth-refreshing, rate-limited Proxy used by every service below; callers
@@ -493,6 +490,7 @@ export async function initServicesFromConfig(
   config: LoreConfig,
   options: InitServicesOptions = {}
 ): Promise<LoreServices> {
+  const profile = resolveProfileFromConfig(config)
   const auth = await resolveAuth(config, configRoot)
   const authRefresh = createNtnAuthRefresh(auth, configRoot, config)
   const authSnapshotRef = { current: toClientAuth(auth) }
@@ -526,7 +524,7 @@ export async function initServicesFromConfig(
         createClient: (token, baseUrl) =>
           createLimitedClient(
             installWriteBudget(createClient(token, baseUrl)),
-            rateLimitOptions,
+            rateLimitOptions
           ),
         onAuthChange: (nextAuth) => {
           authSnapshotRef.current = nextAuth
@@ -535,7 +533,7 @@ export async function initServicesFromConfig(
       })
     : createLimitedClient(
         installWriteBudget(createClient(auth.token, auth.baseUrl)),
-        rateLimitOptions,
+        rateLimitOptions
       )
   // Install the shutdown hook ONLY when bench-mode env was active.
   // The handler set is module-scope and once-per-process; this call
@@ -555,11 +553,7 @@ export async function initServicesFromConfig(
   // source is a known integration-secret path that RunTool will
   // reject with 403. Without this, every flagged-on call silently
   // falls back to REST and the operator sees zero RunTool traffic.
-  if (
-    isRunToolEnabled() ||
-    isRunToolBlockEditEnabled() ||
-    isRunToolFilterSqlEnabled()
-  ) {
+  if (isRunToolEnabled() || isRunToolBlockEditEnabled() || isRunToolFilterSqlEnabled()) {
     warnRunToolIntegrationSecretOnce(auth.source)
   }
 
@@ -568,7 +562,7 @@ export async function initServicesFromConfig(
   // non-refreshing token-rotation path must update authSnapshotRef and clear
   // the identity resolver cache just like the onAuthChange branch above.
 
-  const vault = new VaultManager(client, config.vault.pageId)
+  const vault = new VaultManager(client, config.vault.pageId, profile)
   const driftCheck = await resolveDriftCheck(configRoot, options.driftCheck)
   await vault.load({ driftCheck })
 
@@ -592,17 +586,15 @@ export async function initServicesFromConfig(
   // one-line stderr notice surfaces the gap so the operator knows to
   // run `lore migrate`.
   const scopeCtx = resolveMemoryScopeContext()
-  const scopeColumnsReady = await probeScopeColumnsPresent(client, db).catch(
-    () => {
-      // Probe failure (transient 5xx, rate-limit blip) is the
-      // conservative branch: assume the columns exist and let any
-      // genuine missing-property error surface from the first read.
-      // The alternative (assume missing, disable scope) would silently
-      // turn off the filter on a working vault for the entire process
-      // lifetime when one transient retrieve blip happens at startup.
-      return true
-    }
-  )
+  const scopeColumnsReady = await probeScopeColumnsPresent(client, db).catch(() => {
+    // Probe failure (transient 5xx, rate-limit blip) is the
+    // conservative branch: assume the columns exist and let any
+    // genuine missing-property error surface from the first read.
+    // The alternative (assume missing, disable scope) would silently
+    // turn off the filter on a working vault for the entire process
+    // lifetime when one transient retrieve blip happens at startup.
+    return true
+  })
   if (!scopeColumnsReady) {
     process.stderr.write(
       "[lore] scope/lifetime columns missing on this vault — recall " +
@@ -648,6 +640,7 @@ export async function initServicesFromConfig(
 
   return {
     client,
+    profile,
     vault,
     projects,
     topics,

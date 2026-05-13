@@ -229,12 +229,12 @@ export function registerFooTools(server: McpServer, services: LoreServices): voi
 7. **Return format**: Always return `{ content: [{ type: "text", text: "..." }] }`.
    Format output as readable markdown when returning multiple items.
 
-8. **Tags are a closed vocabulary.** Any tool that accepts `tags` must use
-   `tagsSchema` from `tools/tag-schema.ts` (backed by `TAG_VOCABULARY` in
-   `types.ts`). Pair it with `keywordsSchema` so callers have a home for
-   free-form tokens (PR numbers, ticket IDs, file paths, class names).
-   Out-of-vocab tags must fail validation — don't loosen this at the tool
-   boundary.
+8. **Tags are a profile-owned closed vocabulary.** Any tool that writes
+   `tags` must build its schema from `createTagsSchema(services.profile...)`
+   in `tools/tag-schema.ts`. Pair it with `keywordsSchema` so callers have a
+   home for free-form tokens (PR numbers, ticket IDs, file paths, class
+   names). Out-of-vocab tags must fail validation. Read filters remain
+   permissive so legacy or out-of-profile rows can still be found.
 
 9. **Interactive init failures stay MCP-visible.** If `initServices()` fails
    during normal MCP startup, register diagnostic stubs for every `lore-*`
@@ -673,11 +673,10 @@ atomic relationship objects. Tracking predicates were dropped from
 | `review`    | Mark a decision as reviewed; set, advance, or clear `Review By` (default +90 days)                                  | No        |
 
 **Decision predicates are internal-only.** `decided_by`, `supersedes_decision`,
-and `informs` are in the `FactPredicate` union and the Notion `Predicate`
-select options, but they are NOT in `PREDICATE_VALUES` in `tools/knowledge.ts`.
-This prevents users from creating inconsistent decision edges via
-`lore-fact` — only `DecisionService` and the decision tools create
-these facts.
+and `informs` are in the Notion `Predicate` select options, but they are not
+part of the active profile's writable fact predicates. This prevents users
+from creating inconsistent decision edges via `lore-fact` — only
+`DecisionService` and the decision tools create these facts.
 
 **`lore-fact action='create'` requires provenance.** Every fact must link
 back to a supporting memory so `lore-query action='ask'` can retrace the

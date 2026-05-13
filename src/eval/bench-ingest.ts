@@ -35,10 +35,7 @@ import {
   type MiningResult,
   type RunConversationMiningOptions,
 } from "../hooks/conversation-mining.js"
-import type {
-  LongMemEvalExample,
-  LongMemEvalSessionTurn,
-} from "./bench-corpus.js"
+import type { LongMemEvalExample, LongMemEvalSessionTurn } from "./bench-corpus.js"
 import { renderSessionTranscript } from "./bench-corpus.js"
 import type { EmitAutoMentionsResult } from "../core/auto-mentions.js"
 import { SIMULATED_AUTOSAVE_MAX_MUTATIONS_PER_MEMORY } from "../core/auto-mentions.js"
@@ -115,7 +112,7 @@ export interface RunBenchIngestInput {
   /** Mining-seam adapter. Overridable for tests. */
   runMining?: (
     transcript: string,
-    options: RunConversationMiningOptions,
+    options: RunConversationMiningOptions
   ) => Promise<MiningResult>
   /** Post-run diagnostic count source. Required in production. */
   countMemoriesForProject: (projectId: string) => Promise<number>
@@ -169,7 +166,7 @@ export function readBudgetCount(statePath: string): number | null {
  * exits.
  */
 export async function runBenchIngest(
-  input: RunBenchIngestInput,
+  input: RunBenchIngestInput
 ): Promise<BenchIngestResult> {
   const now = input.now ?? Date.now
   const readCount = input.readBudgetCount ?? readBudgetCount
@@ -321,7 +318,7 @@ export interface RunBenchRawTranscriptInput {
 const RAW_TRANSCRIPT_MAX_MUTATIONS_PER_SESSION = 2
 
 export async function runBenchRawTranscriptIngest(
-  input: RunBenchRawTranscriptInput,
+  input: RunBenchRawTranscriptInput
 ): Promise<BenchIngestResult> {
   const now = input.now ?? Date.now
   const t0 = now()
@@ -352,7 +349,10 @@ export async function runBenchRawTranscriptIngest(
     // `notionWrites + 1` would let one bench session push the
     // counter from cap−1 to cap+1, breaking the inclusive-cap
     // contract operators advertise as "max N writes per example."
-    if (notionWrites + RAW_TRANSCRIPT_MAX_MUTATIONS_PER_SESSION > input.perExampleWrites) {
+    if (
+      notionWrites + RAW_TRANSCRIPT_MAX_MUTATIONS_PER_SESSION >
+      input.perExampleWrites
+    ) {
       writeBudgetExceeded = true
       failureReason = "write-cap-exceeded"
       failureMessage = `Write budget reached after ${sessionsReplayed} session(s).`
@@ -411,6 +411,7 @@ export interface RunBenchSimulatedAutosaveInput {
   extractionClient: BenchExtractionClient
   extractionModel?: string
   extractionMaxTokens?: number
+  tagVocabulary?: readonly string[]
   createSimulatedAutosaveMemoryInProject: (input: {
     projectId: string
     createInput: CreateMemoryInput
@@ -427,7 +428,7 @@ export interface RunBenchSimulatedAutosaveInput {
 }
 
 export async function runBenchSimulatedAutosaveIngest(
-  input: RunBenchSimulatedAutosaveInput,
+  input: RunBenchSimulatedAutosaveInput
 ): Promise<BenchIngestResult> {
   const now = input.now ?? Date.now
   const t0 = now()
@@ -456,9 +457,8 @@ export async function runBenchSimulatedAutosaveIngest(
         extractionPrompt: input.extractionPrompt,
         transcript,
         model: input.extractionModel ?? SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
-        maxTokens:
-          input.extractionMaxTokens ??
-          SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+        maxTokens: input.extractionMaxTokens ?? SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS,
+        tagVocabulary: input.tagVocabulary,
       })
       extractionUsage = addExtractionUsage(extractionUsage, extracted.usage)
     } catch (err) {
@@ -474,6 +474,7 @@ export async function runBenchSimulatedAutosaveIngest(
       raw: extracted.raw,
       projectId: input.projectId,
       sessionId,
+      tagVocabulary: input.tagVocabulary,
     })
 
     for (const plan of plans) {
@@ -541,10 +542,10 @@ export async function runBenchSimulatedAutosaveIngest(
 function logDiagnosticCountError(
   kind: "memories" | "facts",
   projectId: string,
-  err: unknown,
+  err: unknown
 ): void {
   const message = err instanceof Error ? err.message : String(err)
   process.stderr.write(
-    `[bench] warn: diagnostic-count failure (${kind}, project=${projectId}): ${message}\n`,
+    `[bench] warn: diagnostic-count failure (${kind}, project=${projectId}): ${message}\n`
   )
 }

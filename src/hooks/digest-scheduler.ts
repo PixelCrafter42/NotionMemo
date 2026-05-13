@@ -210,9 +210,15 @@ export async function fireDigestIfStale(
     // The explicit escape is `lore digest --since YYYY-MM-DD`, which
     // widens the window past the per-project 7-day debounce.
     await touch(state.configRoot, project.name)
-    await clearFailureMarker(clearFailure, state.configRoot, "digest-scheduler", {
-      projectName: project.name,
-    }, schedulerRecoveredAt)
+    await clearFailureMarker(
+      clearFailure,
+      state.configRoot,
+      "digest-scheduler",
+      {
+        projectName: project.name,
+      },
+      schedulerRecoveredAt
+    )
     return "no-activity"
   }
 
@@ -221,7 +227,8 @@ export async function fireDigestIfStale(
     digest.raw,
     resolved.name,
     today,
-    digest.lastDigestDate
+    digest.lastDigestDate,
+    { profilePrompts: services.profile?.prompts }
   )
 
   // Optimistic touch: claim the marker BEFORE spawning so a sibling Stop
@@ -229,9 +236,15 @@ export async function fireDigestIfStale(
   // marker and skips. Roll back if the spawn itself fails so the next Stop
   // hook retries.
   await touch(state.configRoot, project.name)
-  await clearFailureMarker(clearFailure, state.configRoot, "digest-scheduler", {
-    projectName: project.name,
-  }, schedulerRecoveredAt)
+  await clearFailureMarker(
+    clearFailure,
+    state.configRoot,
+    "digest-scheduler",
+    {
+      projectName: project.name,
+    },
+    schedulerRecoveredAt
+  )
 
   // Synthetic lock key prefixes "digest-" so it never collides with a real
   // session-id. Two Stop-triggered auto-digest spawns for the same project
@@ -257,9 +270,15 @@ export async function fireDigestIfStale(
   })
 
   if (result.kind === "spawned") {
-    await clearFailureMarker(clearFailure, state.configRoot, "digest-synthesizer", {
-      projectName: project.name,
-    }, synthesizerRecoveredAt)
+    await clearFailureMarker(
+      clearFailure,
+      state.configRoot,
+      "digest-synthesizer",
+      {
+        projectName: project.name,
+      },
+      synthesizerRecoveredAt
+    )
     return "fired"
   }
 

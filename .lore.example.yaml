@@ -12,6 +12,10 @@ vault:
   # angle-bracket placeholder is rejected at config load.
   pageId: "<your-vault-page-id>"
 
+# Profile selector. Omit to use the runtime default in memory; new
+# `lore init` configs write this explicitly.
+profile: default@1.0.0
+
 # Authentication (0.10.0+)
 # Lore resolves a Notion bearer token from the first available source in
 # this priority order:

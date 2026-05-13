@@ -22,7 +22,7 @@ import {
   withWakeUpCacheBump,
 } from "../helpers.js"
 import { resolveProjectIds, resolveReadProjectScope } from "../resolve.js"
-import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { createTagsSchema, keywordsSchema } from "./tag-schema.js"
 import { scopeInputSchema } from "./scope-schema.js"
 import { taskDaysOverdue } from "../../core/task.js"
 import {
@@ -834,67 +834,72 @@ async function handleReconcile(
  * handler so unsupported action+param combinations surface as clean
  * errors via `formatDispatchError`.
  */
-const taskDispatchSchema = z.discriminatedUnion("action", [
-  z.object({
-    action: z.literal("create"),
-    subject: nonBlankString,
-    description: z.string().optional(),
-    entity: z.string().optional(),
-    state: z.enum(TASK_STATES).optional(),
-    blockedBy: z.string().optional(),
-    dueDate: ymdDateSchema.optional(),
-    affectsIds: z.array(z.string()).optional(),
-    projectName: z.string().optional(),
-    projectNames: z.array(z.string()).optional(),
-    topicName: z.string().optional(),
-    forceNewTopic: z.boolean().optional(),
-    confidence: z.enum(CONFIDENCES).optional(),
-    tags: tagsSchema.optional(),
-    keywords: keywordsSchema.optional(),
-    synopsis: z.string().max(SYNOPSIS_MAX).optional(),
-    author: z.string().optional(),
-    agent: z.string().optional(),
-    session: z.string().optional(),
-    scope: scopeInputSchema,
-  }),
-  z.object({
-    action: z.literal("update"),
-    taskId: z.string(),
-    state: z.enum(TASK_STATES).optional(),
-    blockedBy: z.string().optional(),
-    entity: z.string().optional(),
-    dueDate: clearableYmdDateSchema.optional(),
-    subject: z.string().optional(),
-    description: z.string().optional(),
-    tags: tagsSchema.optional(),
-    keywords: keywordsSchema.optional(),
-    synopsis: z.string().max(SYNOPSIS_MAX).optional(),
-    scope: scopeInputSchema,
-  }),
-  z.object({
-    action: z.literal("close"),
-    taskId: z.string(),
-    state: z.enum(CLOSE_STATES).optional(),
-  }),
-  z.object({
-    action: z.literal("list"),
-    projectName: z.string().optional(),
-    entity: z.string().optional(),
-    state: z.enum(TASK_STATES).optional(),
-    dueBefore: ymdDateSchema.optional(),
-    limit: z.number().int().min(1).max(200).optional(),
-    startCursor: z.string().min(1).optional(),
-    includeSynopsis: z.boolean().optional(),
-  }),
-  z.object({
-    action: z.literal("reconcile"),
-    projectName: z.string().optional(),
-    minScore: z.number().min(0).max(1).optional(),
-    limit: z.number().int().min(1).max(MAX_RECONCILE_LIMIT).optional(),
-  }),
-])
+function createTaskDispatchSchema(tagsSchema: ReturnType<typeof createTagsSchema>) {
+  return z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("create"),
+      subject: nonBlankString,
+      description: z.string().optional(),
+      entity: z.string().optional(),
+      state: z.enum(TASK_STATES).optional(),
+      blockedBy: z.string().optional(),
+      dueDate: ymdDateSchema.optional(),
+      affectsIds: z.array(z.string()).optional(),
+      projectName: z.string().optional(),
+      projectNames: z.array(z.string()).optional(),
+      topicName: z.string().optional(),
+      forceNewTopic: z.boolean().optional(),
+      confidence: z.enum(CONFIDENCES).optional(),
+      tags: tagsSchema.optional(),
+      keywords: keywordsSchema.optional(),
+      synopsis: z.string().max(SYNOPSIS_MAX).optional(),
+      author: z.string().optional(),
+      agent: z.string().optional(),
+      session: z.string().optional(),
+      scope: scopeInputSchema,
+    }),
+    z.object({
+      action: z.literal("update"),
+      taskId: z.string(),
+      state: z.enum(TASK_STATES).optional(),
+      blockedBy: z.string().optional(),
+      entity: z.string().optional(),
+      dueDate: clearableYmdDateSchema.optional(),
+      subject: z.string().optional(),
+      description: z.string().optional(),
+      tags: tagsSchema.optional(),
+      keywords: keywordsSchema.optional(),
+      synopsis: z.string().max(SYNOPSIS_MAX).optional(),
+      scope: scopeInputSchema,
+    }),
+    z.object({
+      action: z.literal("close"),
+      taskId: z.string(),
+      state: z.enum(CLOSE_STATES).optional(),
+    }),
+    z.object({
+      action: z.literal("list"),
+      projectName: z.string().optional(),
+      entity: z.string().optional(),
+      state: z.enum(TASK_STATES).optional(),
+      dueBefore: ymdDateSchema.optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+      startCursor: z.string().min(1).optional(),
+      includeSynopsis: z.boolean().optional(),
+    }),
+    z.object({
+      action: z.literal("reconcile"),
+      projectName: z.string().optional(),
+      minScore: z.number().min(0).max(1).optional(),
+      limit: z.number().int().min(1).max(MAX_RECONCILE_LIMIT).optional(),
+    }),
+  ])
+}
 
 export function registerTaskTools(server: McpServer, services: LoreServices): void {
+  const tagsSchema = createTagsSchema(services.profile?.taxonomy.tags)
+  const taskDispatchSchema = createTaskDispatchSchema(tagsSchema)
+
   // -------------------------------------------------------------------------
   // lore-task — polymorphic dispatcher (PF3-06)
   // -------------------------------------------------------------------------
@@ -1117,15 +1122,15 @@ export function registerTaskTools(server: McpServer, services: LoreServices): vo
       switch (data.action) {
         case "create":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleCreate(services, data),
+            handleCreate(services, data)
           )
         case "update":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleUpdate(services, data),
+            handleUpdate(services, data)
           )
         case "close":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleClose(services, data),
+            handleClose(services, data)
           )
         case "list":
           return handleList(services, data)

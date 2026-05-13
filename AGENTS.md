@@ -21,6 +21,7 @@
 | ----- | ---------- |
 | [`docs/development.md`](docs/development.md) | Architecture, commands, conventions, stability rules, troubleshooting |
 | [`docs/authentication.md`](docs/authentication.md) | Auth priority chain, ntn behavior, rate limits, auth troubleshooting |
+| [`docs/profiles.md`](docs/profiles.md) | Default profile selector, profile-owned taxonomy/schema/prompts, no-singleton threading |
 | [`docs/memory-workflows.md`](docs/memory-workflows.md) | Lore memory/fact/decision/task workflow, confidence, topic keys, digest |
 | [`docs/conflict-detection.md`](docs/conflict-detection.md) | `lore conflicts scan` workflow and compare-verdict contract |
 | [`docs/memory-debt.md`](docs/memory-debt.md) | `lore debt scan` / `create-tasks` audit categories, scoring, recommended maintenance cadence, idempotency contract |

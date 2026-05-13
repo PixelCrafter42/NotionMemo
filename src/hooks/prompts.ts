@@ -8,6 +8,23 @@
 
 import { safeFilenameSegment } from "./marker-key.js"
 import { indentUntrustedText } from "./untrusted-text.js"
+import type { ResolvedPromptRegistry } from "../profile/index.js"
+
+type SavePromptRegistry = Pick<
+  ResolvedPromptRegistry,
+  "autosaveExtractionFilter" | "autosaveToolGuidance" | "atomicLearningExtraction"
+>
+
+type DigestPromptRegistry = Pick<ResolvedPromptRegistry, "digestSynthesis">
+
+function renderProfileTemplate(
+  template: string,
+  variables: Record<string, string>
+): string {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) =>
+    Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : match
+  )
+}
 
 /**
  * Shared project-selection guidance used by every save-style prompt. When
@@ -207,10 +224,20 @@ export const PER_SPAWN_LEARNING_LIMIT = 5
  * DS — so it would miss any foreground `lore-memory action='save'` row
  * whose title doesn't already have a matching fact edge.
  */
-function buildLearningExtractionGuidance(opts?: { proposeByDefault?: boolean }): string {
-  const statusLine = opts?.proposeByDefault === true
-    ? `\n  - status: "proposed" (review-inbox routing — this fleet is configured to gate auto-extracted learnings on human or authorized-agent approval before they enter default recall)`
-    : ""
+function buildLearningExtractionGuidance(opts?: {
+  proposeByDefault?: boolean
+  template?: string
+}): string {
+  const statusLine =
+    opts?.proposeByDefault === true
+      ? `\n  - status: "proposed" (review-inbox routing — this fleet is configured to gate auto-extracted learnings on human or authorized-agent approval before they enter default recall)`
+      : ""
+  if (opts?.template) {
+    return renderProfileTemplate(opts.template, {
+      limit: String(PER_SPAWN_LEARNING_LIMIT),
+      statusLine,
+    })
+  }
   return `In addition to a session-level synopsis, identify *atomic learnings* — single-fact discoveries from this session that would help a future session even without context. Examples:
 
   - "bcrypt cost=12 is the right balance for server CPU at our load."
@@ -272,16 +299,18 @@ export function buildBackgroundSavePrompt(
     extractLearnings?: boolean
     proposeLearnings?: boolean
     authorName?: string
+    profilePrompts?: SavePromptRegistry
   }
 ): string {
   const identitySection = buildIdentityBlock(sessionId, agentName, options?.authorName)
   const projectSection = buildProjectSelectionGuidance(subProjects, catchAllName)
-  const filter = buildExtractionFilter()
+  const prompts = options?.profilePrompts
+  const filter = prompts?.autosaveExtractionFilter.text ?? buildExtractionFilter()
   const learningGuidance =
     options?.extractLearnings !== false
-      ? `\n\n${buildLearningExtractionGuidance({ proposeByDefault: options?.proposeLearnings === true })}`
+      ? `\n\n${buildLearningExtractionGuidance({ proposeByDefault: options?.proposeLearnings === true, template: prompts?.atomicLearningExtraction.text })}`
       : ""
-  const tools = buildToolGuidance()
+  const tools = prompts?.autosaveToolGuidance.text ?? buildToolGuidance()
 
   return `[Lore autosave] You are reviewing a Claude Code or Codex session in progress.
 
@@ -341,9 +370,10 @@ export function buildDigestPrompt(
   rawData: string,
   projectName: string,
   today: string,
-  lastDigestDate: string | null
+  lastDigestDate: string | null,
+  options?: { profilePrompts?: DigestPromptRegistry }
 ): string {
-  const filter = buildDigestFilter()
+  const filter = options?.profilePrompts?.digestSynthesis.text ?? buildDigestFilter()
   const lastDigestLine = lastDigestDate
     ? `The previous digest for this project is dated ${lastDigestDate}. Cover the window since then — do not repeat content already captured there.`
     : `No previous digest exists for this project. This is the first one.`

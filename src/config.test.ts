@@ -8,15 +8,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest"
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
   _resetConfigAuthTokenWarningStateForTests,
   loadConfig,
@@ -182,6 +174,27 @@ promotionTargets:
     ])
   })
 
+  it("parses an optional exact profile selector", () => {
+    const { config, warnings } = parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: abc123
+profile: default@1.0.0
+`)
+
+    expect(warnings).toEqual([])
+    expect(config.profile).toBe("default@1.0.0")
+  })
+
+  it("rejects malformed profile selectors", () => {
+    expect(() =>
+      parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: abc123
+profile: default
+`)
+    ).toThrow(/Expected exact <name>@<semver>/)
+  })
+
   it("rejects bearer-shaped auth.token values at parse time", () => {
     for (const token of [
       "secret_real_notion_integration_token",
@@ -196,7 +209,7 @@ vault:
   pageId: abc123
 auth:
   token: ${token}
-`),
+`)
       ).toThrow(/auth\.token in \.lore\.yaml cannot contain a Notion bearer token/)
     }
   })
@@ -223,12 +236,12 @@ vault:
   pageId: abc123
 auth:
   token: ntn_real_notion_user_token
-`,
+`
     )
 
     try {
       await expect(loadConfig(path)).rejects.toThrow(
-        /auth\.token in \.lore\.yaml cannot contain a Notion bearer token/,
+        /auth\.token in \.lore\.yaml cannot contain a Notion bearer token/
       )
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -240,7 +253,7 @@ auth:
       parseConfigAllowingInvalidHooks(`
 vault:
   pageId: "<your-vault-page-id>"
-`),
+`)
     ).toThrow(/starter placeholder/)
   })
 
@@ -252,7 +265,7 @@ vault:
 upstreamVaults:
   - name: Engineering
     pageId: "<engineering-vault-page-id>"
-`),
+`)
     ).toThrow(/starter placeholder/)
   })
 })
@@ -266,7 +279,7 @@ describe("loadConfig placeholder rejection", () => {
       `
 vault:
   pageId: "<your-vault-page-id>"
-`,
+`
     )
 
     try {
@@ -370,7 +383,7 @@ describe("resolveAuth", () => {
       stderrChunks.push(
         typeof chunk === "string"
           ? chunk
-          : Buffer.from(chunk as Uint8Array).toString("utf8"),
+          : Buffer.from(chunk as Uint8Array).toString("utf8")
       )
       return true
     })
@@ -542,9 +555,7 @@ describe("resolveAuth", () => {
   })
 
   it("threads NOTION_WORKSPACE_ID env into the ntn selector", async () => {
-    setupNtnConfigHome(
-      JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }),
-    )
+    setupNtnConfigHome(JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }))
     setupHookStateDir()
     process.env["NOTION_WORKSPACE_ID"] = "ws-2"
 
@@ -553,9 +564,7 @@ describe("resolveAuth", () => {
   })
 
   it("threads config.auth.workspaceId into the ntn selector when env is absent", async () => {
-    setupNtnConfigHome(
-      JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }),
-    )
+    setupNtnConfigHome(JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }))
     setupHookStateDir()
 
     const config: LoreConfig = {
@@ -997,18 +1006,12 @@ describe("resolveAuth", () => {
     // "Phase 2 will ship" copy that would contradict the wrapper
     // those very commands provide.
     await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /No Notion auth configured/,
+      /No Notion auth configured/
     )
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /lore auth --login/,
-    )
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /NOTION_API_TOKEN/,
-    )
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/lore auth --login/)
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/NOTION_API_TOKEN/)
     // The stale "Phase 2 will ship" copy must be gone.
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.not.toThrow(
-      /once Phase 2/,
-    )
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.not.toThrow(/once Phase 2/)
   })
 
   it("throw message inlines the ntn ambiguity hint when auth.json carries multiple workspaces", async () => {
@@ -1017,20 +1020,12 @@ describe("resolveAuth", () => {
     // fallback resolves. At the throw site (no source resolved), we
     // re-detect the ambiguity case and surface a single hint listing
     // the available workspaces — gives operators a concrete next step.
-    setupNtnConfigHome(
-      JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }),
-    )
+    setupNtnConfigHome(JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }))
     setupHookStateDir()
 
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /carries 2 workspaces/,
-    )
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /NOTION_WORKSPACE_ID/,
-    )
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /Available: ws-1, ws-2/,
-    )
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/carries 2 workspaces/)
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/NOTION_WORKSPACE_ID/)
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/Available: ws-1, ws-2/)
   })
 
   it("throw message inlines the selector-miss hint when auth.json doesn't carry the requested workspace", async () => {
@@ -1039,24 +1034,20 @@ describe("resolveAuth", () => {
     process.env["NOTION_WORKSPACE_ID"] = "ws-missing"
 
     await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /requested workspaceId \(ws-missing\) is not among them/,
+      /requested workspaceId \(ws-missing\) is not among them/
     )
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /Available: ws-1/,
-    )
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/Available: ws-1/)
     // Recovery recommendation MUST point at `lore auth --login` (the
     // canonical wrapper that forces NOTION_KEYRING=0). Bare
     // `ntn login` on macOS defaults to keychain mode and writes
     // nothing to auth.json, so a recovery hint that recommended it
     // would loop the operator back into this same selector miss on
     // the next run. Round-4 review blocker; pin against revert.
-    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(
-      /lore auth --login/,
-    )
+    await expect(resolveAuth(undefined, SCRATCH)).rejects.toThrow(/lore auth --login/)
     // The bare-ntn-login wording must NOT appear standalone (the
     // recommendation can't substitute it for the wrapper).
     await expect(resolveAuth(undefined, SCRATCH)).rejects.not.toThrow(
-      /Run `ntn login` against/,
+      /Run `ntn login` against/
     )
   })
 
@@ -1068,9 +1059,7 @@ describe("resolveAuth", () => {
     // away from LORE_NOTION_TOKEN"). `quiet: true` on the
     // `loadNtnToken` call suppresses the ntn hint so only the
     // deprecation warning fires.
-    setupNtnConfigHome(
-      JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }),
-    )
+    setupNtnConfigHome(JSON.stringify({ "ws-1": "tok-1", "ws-2": "tok-2" }))
     setupHookStateDir()
     process.env["LORE_NOTION_TOKEN"] = "tok-legacy-env"
 
@@ -1101,7 +1090,7 @@ describe("resolveToken", () => {
       stderrChunks.push(
         typeof chunk === "string"
           ? chunk
-          : Buffer.from(chunk as Uint8Array).toString("utf8"),
+          : Buffer.from(chunk as Uint8Array).toString("utf8")
       )
       return true
     })

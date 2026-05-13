@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { createTagsSchema, tagsSchema, keywordsSchema } from "./tag-schema.js"
 
 describe("tagsSchema", () => {
   it("accepts tags from the closed vocabulary", () => {
@@ -61,6 +61,18 @@ describe("tagsSchema", () => {
     // doesn't silently change the error shape for numeric / null inputs.
     const result = tagsSchema.safeParse([123, null])
     expect(result.success).toBe(false)
+  })
+
+  it("builds an isolated schema for a supplied profile vocabulary", () => {
+    const profileTags = createTagsSchema(["alpha", "beta"])
+    expect(profileTags.safeParse(["alpha"]).success).toBe(true)
+
+    const result = profileTags.safeParse(["ios"])
+    expect(result.success).toBe(false)
+    if (result.success) return
+    const message = result.error.issues[0].message
+    expect(message).toContain("alpha, beta")
+    expect(message).not.toContain("performance")
   })
 })
 

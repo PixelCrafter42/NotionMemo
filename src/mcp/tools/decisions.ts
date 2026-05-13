@@ -21,7 +21,7 @@ import {
   memoryScopeToInput,
 } from "../../types.js"
 import type { Decision, DecisionSummary, DecisionStatus } from "../../types.js"
-import { tagsSchema, keywordsSchema } from "./tag-schema.js"
+import { createTagsSchema, keywordsSchema } from "./tag-schema.js"
 import { scopeInputSchema } from "./scope-schema.js"
 import { clearableYmdDateSchema, ymdDateSchema } from "./date-schema.js"
 import { nonBlankBody, nonBlankString } from "./text-schema.js"
@@ -967,74 +967,76 @@ async function handleReview(
   }
 }
 
-const decisionDispatchSchema = z.discriminatedUnion("action", [
-  z.object({
-    action: z.literal("create"),
-    decision: nonBlankString,
-    // `rationale` is the markdown page body; nonBlankBody validates
-    // without transforming so authored whitespace (indented code,
-    // intentional leading newlines) round-trips verbatim into Notion.
-    rationale: nonBlankBody,
-    projectName: z.string().optional(),
-    projectNames: z.array(z.string()).optional(),
-    topicName: z.string().optional(),
-    forceNewTopic: z.boolean().optional(),
-    status: z.enum(DECISION_STATUSES).optional(),
-    confidence: z.enum(CONFIDENCES).optional(),
-    reviewBy: ymdDateSchema.optional(),
-    decidedAt: ymdDateSchema.optional(),
-    supersedesIds: z.array(z.string()).optional(),
-    affects: z.array(z.string()).optional(),
-    alternatives: richTextPropertySchema("alternatives").optional(),
-    consequences: richTextPropertySchema("consequences").optional(),
-    tags: tagsSchema.optional(),
-    keywords: keywordsSchema.optional(),
-    synopsis: z.string().max(SYNOPSIS_MAX).optional(),
-    author: z.string().optional(),
-    agent: z.string().optional(),
-    session: z.string().optional(),
-    scope: scopeInputSchema,
-  }),
-  z.object({
-    action: z.literal("list"),
-    projectName: z.string().optional(),
-    status: z.enum(DECISION_STATUSES).optional(),
-    reviewBefore: ymdDateSchema.optional(),
-    limit: z.number().int().min(1).max(100).optional(),
-    startCursor: z.string().min(1).optional(),
-    includeSynopsis: z.boolean().optional(),
-  }),
-  z.object({
-    action: z.literal("get"),
-    decisionId: z.string(),
-  }),
-  z.object({
-    action: z.literal("context"),
-    // Reject empty / whitespace-only entity at the boundary. The
-    // handler routes through `FactService.queryByEntity`,
-    // which short-circuits an empty input to `[]`, but failing the
-    // dispatch with a clear error beats silently returning "no
-    // decisions found" when the agent passed a blank string by mistake.
-    entity: z
-      .string()
-      .trim()
-      .min(1, "entity must be a non-empty string"),
-    projectName: z.string().optional(),
-    limit: z.number().int().min(1).max(50).optional(),
-  }),
-  z.object({
-    action: z.literal("supersede"),
-    newDecisionId: z.string(),
-    oldDecisionId: z.string(),
-  }),
-  z.object({
-    action: z.literal("review"),
-    decisionId: z.string(),
-    reviewBy: clearableYmdDateSchema.optional(),
-  }),
-])
+function createDecisionDispatchSchema(tagsSchema: ReturnType<typeof createTagsSchema>) {
+  return z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("create"),
+      decision: nonBlankString,
+      // `rationale` is the markdown page body; nonBlankBody validates
+      // without transforming so authored whitespace (indented code,
+      // intentional leading newlines) round-trips verbatim into Notion.
+      rationale: nonBlankBody,
+      projectName: z.string().optional(),
+      projectNames: z.array(z.string()).optional(),
+      topicName: z.string().optional(),
+      forceNewTopic: z.boolean().optional(),
+      status: z.enum(DECISION_STATUSES).optional(),
+      confidence: z.enum(CONFIDENCES).optional(),
+      reviewBy: ymdDateSchema.optional(),
+      decidedAt: ymdDateSchema.optional(),
+      supersedesIds: z.array(z.string()).optional(),
+      affects: z.array(z.string()).optional(),
+      alternatives: richTextPropertySchema("alternatives").optional(),
+      consequences: richTextPropertySchema("consequences").optional(),
+      tags: tagsSchema.optional(),
+      keywords: keywordsSchema.optional(),
+      synopsis: z.string().max(SYNOPSIS_MAX).optional(),
+      author: z.string().optional(),
+      agent: z.string().optional(),
+      session: z.string().optional(),
+      scope: scopeInputSchema,
+    }),
+    z.object({
+      action: z.literal("list"),
+      projectName: z.string().optional(),
+      status: z.enum(DECISION_STATUSES).optional(),
+      reviewBefore: ymdDateSchema.optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+      startCursor: z.string().min(1).optional(),
+      includeSynopsis: z.boolean().optional(),
+    }),
+    z.object({
+      action: z.literal("get"),
+      decisionId: z.string(),
+    }),
+    z.object({
+      action: z.literal("context"),
+      // Reject empty / whitespace-only entity at the boundary. The
+      // handler routes through `FactService.queryByEntity`,
+      // which short-circuits an empty input to `[]`, but failing the
+      // dispatch with a clear error beats silently returning "no
+      // decisions found" when the agent passed a blank string by mistake.
+      entity: z.string().trim().min(1, "entity must be a non-empty string"),
+      projectName: z.string().optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    }),
+    z.object({
+      action: z.literal("supersede"),
+      newDecisionId: z.string(),
+      oldDecisionId: z.string(),
+    }),
+    z.object({
+      action: z.literal("review"),
+      decisionId: z.string(),
+      reviewBy: clearableYmdDateSchema.optional(),
+    }),
+  ])
+}
 
 export function registerDecisionTools(server: McpServer, services: LoreServices): void {
+  const tagsSchema = createTagsSchema(services.profile?.taxonomy.tags)
+  const decisionDispatchSchema = createDecisionDispatchSchema(tagsSchema)
+
   // -------------------------------------------------------------------------
   // lore-decision — polymorphic dispatcher
   // -------------------------------------------------------------------------
@@ -1233,7 +1235,7 @@ export function registerDecisionTools(server: McpServer, services: LoreServices)
       switch (data.action) {
         case "create":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleCreate(services, data),
+            handleCreate(services, data)
           )
         case "list":
           return handleList(services, data)
@@ -1243,11 +1245,11 @@ export function registerDecisionTools(server: McpServer, services: LoreServices)
           return handleContext(services, data, "lore-decision")
         case "supersede":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleSupersede(services, data),
+            handleSupersede(services, data)
           )
         case "review":
           return withWakeUpCacheBump(services.wakeupCache, () =>
-            handleReview(services, data),
+            handleReview(services, data)
           )
       }
     }

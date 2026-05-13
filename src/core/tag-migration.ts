@@ -15,18 +15,20 @@
 import type { Memory } from "../types.js"
 import { TAG_VOCABULARY } from "../types.js"
 
-const VOCAB_SET: ReadonlySet<string> = new Set<string>(TAG_VOCABULARY)
-
 /**
  * Classify a tag against the closed vocabulary, matching case-insensitively.
  * Returns the canonical vocab term when the tag is a case variant
  * (`iOS`/`IOS` → `ios`), or `null` when it's out of vocabulary. Keeps
  * casing drift from being mistaken for free-form noise.
  */
-export function canonicalVocabTag(tag: string): string | null {
-  if (VOCAB_SET.has(tag)) return tag
+export function canonicalVocabTag(
+  tag: string,
+  vocabulary: readonly string[] = TAG_VOCABULARY
+): string | null {
+  const vocabSet: ReadonlySet<string> = new Set<string>(vocabulary)
+  if (vocabSet.has(tag)) return tag
   const lower = tag.toLowerCase()
-  return VOCAB_SET.has(lower) ? lower : null
+  return vocabSet.has(lower) ? lower : null
 }
 
 /**
@@ -69,12 +71,15 @@ export interface TagClassification {
   ambiguous: string[]
 }
 
-export function classifyTags(tags: readonly string[]): TagClassification {
+export function classifyTags(
+  tags: readonly string[],
+  vocabulary: readonly string[] = TAG_VOCABULARY
+): TagClassification {
   const vocab: string[] = []
   const freeform: string[] = []
   const ambiguous: string[] = []
   for (const t of tags) {
-    const canonical = canonicalVocabTag(t)
+    const canonical = canonicalVocabTag(t, vocabulary)
     if (canonical !== null) vocab.push(canonical)
     else if (isObviousFreeformTag(t)) freeform.push(t)
     else ambiguous.push(t)
@@ -110,8 +115,11 @@ export interface MemoryTagPlan {
  * Existing `Keywords` tokens are preserved and deduped against the moved
  * set so re-running is a no-op on an already-migrated memory.
  */
-export function planMemoryMigration(memory: Memory): MemoryTagPlan | null {
-  const { vocab, freeform, ambiguous } = classifyTags(memory.tags)
+export function planMemoryMigration(
+  memory: Memory,
+  vocabulary: readonly string[] = TAG_VOCABULARY
+): MemoryTagPlan | null {
+  const { vocab, freeform, ambiguous } = classifyTags(memory.tags, vocabulary)
   const nextTags = [...vocab, ...ambiguous]
 
   const tagsChanged =

@@ -4,6 +4,7 @@ import { parse as parseYaml, parseDocument } from "yaml"
 import { z } from "zod"
 import { getStateDir } from "./hooks/lock.js"
 import { configKey } from "./hooks/marker-key.js"
+import { parseProfileSelector } from "./profile/index.js"
 import type { LoreConfig } from "./types.js"
 
 const CONFIG_FILENAME = ".lore.yaml"
@@ -42,18 +43,29 @@ const namedVaultRefSchema = z.object({
 
 const bearerShapedAuthTokenPattern = /^(?:Bearer\s+)?(?:development_ntn_|ntn_|secret_)/
 
-const configAuthTokenSchema = z.string().refine(
-  (token) => !bearerShapedAuthTokenPattern.test(token.trim()),
-  {
+const configAuthTokenSchema = z
+  .string()
+  .refine((token) => !bearerShapedAuthTokenPattern.test(token.trim()), {
     message:
       "auth.token in .lore.yaml cannot contain a Notion bearer token; run `lore auth --login` or set NOTION_API_TOKEN, then remove auth.token.",
-  },
-)
+  })
+
+const profileSelectorSchema = z.string().superRefine((selector, ctx) => {
+  try {
+    parseProfileSelector(selector)
+  } catch (err) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
 
 const configSchema = z.object({
   vault: z.object({
     pageId: pageIdSchema("vault.pageId is required"),
   }),
+  profile: profileSelectorSchema.optional(),
   upstreamVaults: z
     .array(
       namedVaultRefSchema.extend({
@@ -145,7 +157,9 @@ export function parseConfigAllowingInvalidHooks(raw: string): LoadedConfigResult
   }
 
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const hooksResult = hookConfigSchema.safeParse((parsed as Record<string, unknown>)["hooks"])
+    const hooksResult = hookConfigSchema.safeParse(
+      (parsed as Record<string, unknown>)["hooks"]
+    )
     if (!hooksResult.success) {
       return {
         config: configSchema.parse(omitHooks(parsed)),
@@ -200,7 +214,7 @@ export async function loadConfig(configPath: string): Promise<LoreConfig> {
  * `hooks` section should not suppress session-start context injection.
  */
 export async function loadConfigAllowingInvalidHooks(
-  configPath: string,
+  configPath: string
 ): Promise<LoadedConfigResult> {
   const raw = await readFile(configPath, "utf-8")
   return parseConfigAllowingInvalidHooks(raw)
@@ -388,8 +402,7 @@ export async function resolveAuth(
   // ntn-state is ambiguous AND a legacy fallback resolves; if no
   // source resolves we re-detect at the throw site.
   const ntnModule = await import("./auth/ntn.js")
-  const ntnSelector =
-    process.env["NOTION_WORKSPACE_ID"] ?? config?.auth?.workspaceId
+  const ntnSelector = process.env["NOTION_WORKSPACE_ID"] ?? config?.auth?.workspaceId
   const fromNtn = await ntnModule.loadNtnToken({
     workspaceId: ntnSelector,
     quiet: true,
@@ -444,7 +457,7 @@ export async function resolveAuth(
     "No Notion auth configured.\n" +
       (ntnHint ? ntnHint + "\n" : "") +
       "Recommended: run `lore auth --login` to authenticate via ntn.\n" +
-      "Alternative: set NOTION_API_TOKEN with a Notion integration token.",
+      "Alternative: set NOTION_API_TOKEN with a Notion integration token."
   )
 }
 
@@ -467,7 +480,7 @@ export async function resolveAuth(
  */
 async function buildNtnAmbiguityHint(
   ntnModule: typeof import("./auth/ntn.js"),
-  selector: string | undefined,
+  selector: string | undefined
 ): Promise<string | undefined> {
   const workspaces = await ntnModule.listNtnWorkspaces()
   if (workspaces.length === 0) return undefined
@@ -538,7 +551,9 @@ const DEPRECATION_DEBOUNCE_MS = 24 * 60 * 60 * 1000
  * still backed up, synced, and easy to force into git), not session
  * state, and behaves differently under the same threat model.
  */
-async function emitLoreNotionTokenDeprecationWarningOnce(configRoot: string): Promise<void> {
+async function emitLoreNotionTokenDeprecationWarningOnce(
+  configRoot: string
+): Promise<void> {
   if (process.env["LORE_SUPPRESS_DEPRECATIONS"] === "1") return
 
   const stateDir = getStateDir()
@@ -668,7 +683,7 @@ export function _resetConfigAuthTokenWarningStateForTests(): void {
  */
 export async function resolveToken(
   config: LoreConfig | undefined,
-  configRoot: string,
+  configRoot: string
 ): Promise<string> {
   const auth = await resolveAuth(config, configRoot)
   return auth.token

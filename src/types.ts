@@ -25,7 +25,7 @@
  * `prisma`) intentionally live in `Keywords` — they don't survive across
  * vaults and would bloat the enum.
  */
-export const TAG_VOCABULARY = [
+export const DEFAULT_TAG_VOCABULARY = [
   "android",
   "api",
   "architecture",
@@ -68,7 +68,9 @@ export const TAG_VOCABULARY = [
   "workflow",
 ] as const
 
-export type Tag = (typeof TAG_VOCABULARY)[number]
+export const TAG_VOCABULARY = DEFAULT_TAG_VOCABULARY
+
+export type Tag = (typeof DEFAULT_TAG_VOCABULARY)[number]
 
 /**
  * Soft cap on the Synopsis property at the MCP and service boundaries.
@@ -1623,17 +1625,9 @@ export interface ListTasksOpts {
  * neighbour. Sized to the spec's call-out so the migration path lands on
  * a stable starting set.
  */
-export type EntityKind =
-  | "class"
-  | "function"
-  | "file"
-  | "workflow"
-  | "pr"
-  | "task-id"
-  | "person"
-  | "system"
+export type EntityKind = string
 
-export const ENTITY_KINDS: EntityKind[] = [
+export const DEFAULT_ENTITY_KINDS = [
   "class",
   "function",
   "file",
@@ -1642,7 +1636,9 @@ export const ENTITY_KINDS: EntityKind[] = [
   "task-id",
   "person",
   "system",
-]
+] as const
+
+export const ENTITY_KINDS: EntityKind[] = [...DEFAULT_ENTITY_KINDS]
 
 export interface Entity {
   id: string
@@ -1719,30 +1715,29 @@ export interface EntityResolution {
 // Fact (Knowledge Graph)
 // ---------------------------------------------------------------------------
 
-export type FactPredicate =
-  | "is_a"
-  | "has_a"
-  | "uses"
-  | "depends_on"
-  | "related_to"
-  | "created_by"
-  | "owned_by"
-  | "replaces"
-  | "extends"
-  | "conflicts_with"
-  // Decision-graph predicates — created exclusively by DecisionService.
-  // Not exposed through `lore-fact` to keep the decision graph consistent.
-  | "decided_by"
-  | "supersedes_decision"
-  | "informs"
-  // Auto-emitted by `lore-memory action='save'` — one fact
-  // per entity surfaced by `extractEntityCandidates` over the saved
-  // memory's title / keywords / synopsis. Lower-quality (regex-derived,
-  // confidence: speculative) than agent-curated `uses` / `depends_on`
-  // facts; the categorical confidence tag lets retrieval prefer the
-  // agent-curated edges when both exist. Not exposed through
-  // `lore-fact action='create'` because the value is system-managed.
-  | "mentions"
+export type FactPredicate = string
+
+export const GENERIC_FACT_PREDICATES = ["is_a", "has_a", "related_to"] as const
+
+export const DEFAULT_WRITABLE_FACT_PREDICATES = [
+  "uses",
+  "depends_on",
+  "created_by",
+  "owned_by",
+  "replaces",
+  "extends",
+  "conflicts_with",
+] as const
+
+export const RESERVED_FACT_PREDICATES = [
+  "mentions",
+  "decided_by",
+  "supersedes_decision",
+  "informs",
+  "needs_action",
+  "waiting_on",
+  "blocked_by",
+] as const
 
 export type FactConfidence = "certain" | "likely" | "speculative"
 
@@ -1913,6 +1908,12 @@ export interface LoreConfig {
   vault: {
     pageId: string
   }
+  /**
+   * Exact profile selector (`<name>@<semver>`). Omitted legacy configs
+   * resolve in memory to the bundled default profile; read-only starts
+   * never write this field back to disk.
+   */
+  profile?: string
   /**
    * Read-only vaults whose memories can be inherited by topology-aware read
    * paths. The primary vault remains the only normal write target.

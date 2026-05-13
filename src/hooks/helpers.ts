@@ -42,6 +42,7 @@ import { STALE_TASK_DAYS, type LoreConfig, type TaskSummary } from "../types.js"
 import { resolveProjectPathFromCwd } from "../core/context.js"
 import { mergeHookDefaults, type HookConfig } from "./config.js"
 import { buildBackgroundSavePrompt } from "./prompts.js"
+import { resolveProfileFromConfig } from "../profile/index.js"
 import { indentUntrustedText, UNTRUSTED_VAULT_PREAMBLE } from "./untrusted-text.js"
 import {
   DEFAULT_WAKEUP_TASK_LIMIT,
@@ -51,10 +52,7 @@ import {
   formatWakeUpCoverage,
   loadWakeUpData,
 } from "../core/wakeup.js"
-import {
-  composeProjectContext,
-  type ProjectContext,
-} from "../core/project-context.js"
+import { composeProjectContext, type ProjectContext } from "../core/project-context.js"
 import { formatCatchAllScopeSummary } from "../core/context.js"
 import { taskDaysOverdue, taskDaysStale } from "../core/task.js"
 import { spawnBackgroundSave, type SpawnResult } from "./background.js"
@@ -602,6 +600,9 @@ export async function handleStop(
         // accepted recall.
         const proposeLearnings =
           learningExtractionEnabled && config.proposeAutosaveLearnings
+        const profilePrompts = failureContext?.config
+          ? resolveProfileFromConfig(failureContext.config).prompts
+          : undefined
         const prompt = buildBackgroundSavePrompt(
           config.subProjects,
           config.catchAllName,
@@ -612,6 +613,7 @@ export async function handleStop(
             extractLearnings: learningExtractionEnabled,
             proposeLearnings,
             authorName: deriveAuthorName(event),
+            profilePrompts,
           }
         )
         // Only advance the save counter when a background process actually
