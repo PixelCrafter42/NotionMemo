@@ -225,9 +225,10 @@ Phase A is the memory-formation phase.
 
 1. Copy the scenario fixture workspace into a temp directory.
 2. Run the Phase A prompt through the existing task agent adapter. The adapter
-   should capture enough conversation material to render a Codex-style JSONL
-   transcript with `event_msg` entries for the user prompt and final agent
-   response. The resulting workspace state is the input to Phase B.
+   should capture enough conversation material to reconstruct the user prompt
+   and final agent response, then normalize that capture through the transcript
+   helpers into the same human-readable `User:` / `Assistant:` session content
+   the hook path mines. The resulting workspace state is the input to Phase B.
 3. For `no-memory`, stop there. Do not write `.lore.yaml`, do not run autosave,
    and do not seed `.lore-memories.json`.
 4. For `lore-full-loop`, run `runConversationMining(transcript, ...)` from
