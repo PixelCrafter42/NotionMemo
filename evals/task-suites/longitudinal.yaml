@@ -1,0 +1,105 @@
+version: 1
+runner: task
+longitudinal: true
+name: lore-longitudinal-minimal
+description: |
+  Minimal hook-native longitudinal software-task suite. Each scenario runs
+  Phase A and Phase B under no-memory and lore-full-loop. Real Codex runs
+  require LORE_EVAL_TASK_REAL=1; real Lore formation requires
+  LORE_EVAL_LONGITUDINAL_REAL=1 and LORE_EVAL_LONGITUDINAL_SANDBOX_PROJECT.
+
+conditions:
+  - no-memory
+  - lore-full-loop
+
+scenarios:
+  - id: decision-continuity-result-boundary
+    agent: codex
+    workspace: ../longitudinal/workspaces/result-boundary
+    phaseA:
+      promptId: decision-continuity-result-boundary-formation
+      prompt: |
+        Add `createUserProfile(input)` to the profile service. During this
+        work, decide whether service-boundary functions should return Result
+        objects or throw exceptions, implement the chosen pattern, and capture
+        the decision for future sessions.
+    phaseB:
+      promptId: decision-continuity-result-boundary-use
+      prompt: |
+        Continue the profile service by adding `fetchUserProfile(userId)`.
+        Keep it consistent with the service-boundary decision from the
+        previous session.
+    expectedContext:
+      description: Service-boundary functions return Result values with ok / err helpers.
+      keywords: ["Result", "ok", "err"]
+      harmfulKeywords: ["throw new Error"]
+    verifiers:
+      - type: file-contents-match
+        path: profile-service.ts
+        pattern: 'export\s+(?:async\s+)?function\s+fetchUserProfile'
+      - type: file-contents-match
+        path: profile-service.ts
+        pattern: 'return\s+(?:ok|err)\('
+      - type: file-contents-match
+        path: profile-service.ts
+        pattern: 'throw\s+new\s+Error'
+        mode: forbid
+      - type: command
+        command: npm
+        args: ["test"]
+
+  - id: failed-attempt-avoidance-esm-imports
+    agent: codex
+    workspace: ../longitudinal/workspaces/esm-cli
+    phaseA:
+      promptId: failed-attempt-avoidance-esm-imports-formation
+      prompt: |
+        Investigate and fix the failing CLI import test for
+        `commands/status.ts`. If you discover a repo-specific import gotcha,
+        capture it so future sessions do not repeat the same failure.
+    phaseB:
+      promptId: failed-attempt-avoidance-esm-imports-use
+      prompt: |
+        Add `commands/sync.ts` and wire it into the CLI. Continue using the
+        import convention learned in the previous session.
+    expectedContext:
+      description: TypeScript source in this ESM fixture uses .js on internal relative imports.
+      keywords: [".js", "ESM", "relative imports"]
+    verifiers:
+      - type: file-exists
+        path: commands/sync.ts
+      - type: file-contents-match
+        path: commands/sync.ts
+        pattern: 'from\s+["'']\.\.?\/[^"'']+\.js["'']'
+      - type: file-contents-match
+        path: commands/sync.ts
+        pattern: 'from\s+["'']\.\.?\/(?![^"'']*\.js["''])'
+        mode: forbid
+      - type: command
+        command: npm
+        args: ["test"]
+
+  - id: follow-up-task-json-output
+    agent: codex
+    workspace: ../longitudinal/workspaces/follow-up-task
+    phaseA:
+      promptId: follow-up-task-json-output-formation
+      prompt: |
+        Implement the basic text output for the `status` command. Before the
+        session ends, create a follow-up task to add `--json` output for
+        automation consumers.
+    phaseB:
+      promptId: follow-up-task-json-output-use
+      prompt: |
+        Pick up the unresolved follow-up from the previous session and
+        implement it.
+    expectedContext:
+      description: There is an unresolved follow-up to add status --json output.
+      keywords: ["--json", "status", "follow-up"]
+    verifiers:
+      - type: file-contents-match
+        path: status.js
+        pattern: '--json'
+      - type: command
+        command: npm
+        args: ["test"]

@@ -1,0 +1,7 @@
+{
+  "name": "lore-longitudinal-follow-up-task",
+  "type": "module",
+  "scripts": {
+    "test": "node status.check.mjs"
+  }
+}

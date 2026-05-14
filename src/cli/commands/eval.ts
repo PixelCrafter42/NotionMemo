@@ -13,7 +13,11 @@ import {
   readEvalBaselineSnapshot,
   writeEvalBaselineSnapshot,
 } from "../../eval/baseline.js"
-import { runTaskEvalSuite } from "../../eval/task-runner.js"
+import {
+  isLongitudinalTaskArtifact,
+  runTaskEvalSuite,
+  type LongitudinalTaskArtifact,
+} from "../../eval/task-runner.js"
 import { resolveProjectByName } from "../../core/project-scope.js"
 import { EVAL_RUNNERS, peekSuiteRunner, type EvalRunner } from "../../eval/schema.js"
 import { parsePositiveDecimalInteger, type CliParseResult } from "../parse.js"
@@ -40,7 +44,7 @@ export interface EvalRunCliOptions {
   json: boolean
 }
 
-export function parseEvalRunCliOptions(raw: {
+export interface EvalRunRawCliOptions {
   runner?: string
   trials?: string
   out?: string
@@ -50,18 +54,22 @@ export function parseEvalRunCliOptions(raw: {
   project?: string
   limit?: string
   json?: boolean
-}): CliParseResult<EvalRunCliOptions> {
+}
+
+export function parseEvalRunCliOptions(
+  raw: EvalRunRawCliOptions
+): CliParseResult<EvalRunCliOptions> {
   // When `raw.runner` is omitted on the CLI, leave `runner` undefined so
   // the suite YAML's `runner` field wins inside `runEvalSuite`. Default
   // only applies when neither CLI nor YAML specifies one (handled in
   // runner.ts via `loaded.suite.runner`'s schema default).
-  const runner = raw.runner === undefined ? undefined : raw.runner
-  if (runner !== undefined && !isEvalRunner(runner)) {
+  if (raw.runner !== undefined && !isEvalRunner(raw.runner)) {
     return {
       ok: false,
-      message: `--runner must be one of: ${EVAL_RUNNERS.join(", ")}, got "${runner}"`,
+      message: `--runner must be one of: ${EVAL_RUNNERS.join(", ")}, got "${raw.runner}"`,
     }
   }
+  const runner = raw.runner
 
   let trials: number | undefined
   if (raw.trials !== undefined) {
@@ -83,6 +91,43 @@ export function parseEvalRunCliOptions(raw: {
   const maxHarm = parseOptionalUnitInterval("--max-harm", raw.maxHarm)
   if (!maxHarm.ok) return maxHarm
 
+  const compatibility = validateEvalRunRunnerCompatibility(runner, raw)
+  if (!compatibility.ok) return compatibility
+
+  let limit: number | undefined
+  if (raw.limit !== undefined) {
+    // Bench-only gate is enforced AFTER `peekSuiteRunner` resolves
+    // the effective runner in the action handler — a YAML-declared
+    // `runner: bench` should accept `--limit` even when the CLI
+    // flag is omitted. Here we only validate the integer shape.
+    const parsedLimit = parsePositiveDecimalInteger("--limit", raw.limit)
+    if (!parsedLimit.ok) return parsedLimit
+    limit = parsedLimit.value
+  }
+
+  return {
+    ok: true,
+    value: {
+      runner,
+      trials,
+      outPath: raw.out,
+      minLift: minLift.value,
+      maxHarm: maxHarm.value,
+      baselinePath: raw.baseline,
+      projectName: raw.project,
+      limit,
+      json: !!raw.json,
+    },
+  }
+}
+
+export function validateEvalRunRunnerCompatibility(
+  runner: EvalRunner | undefined,
+  raw: Pick<
+    EvalRunRawCliOptions,
+    "baseline" | "minLift" | "maxHarm" | "project"
+  >
+): CliParseResult<void> {
   if (runner === "notion" && (raw.project === undefined || raw.project.length === 0)) {
     return {
       ok: false,
@@ -131,31 +176,7 @@ export function parseEvalRunCliOptions(raw: {
     }
   }
 
-  let limit: number | undefined
-  if (raw.limit !== undefined) {
-    // Bench-only gate is enforced AFTER `peekSuiteRunner` resolves
-    // the effective runner in the action handler — a YAML-declared
-    // `runner: bench` should accept `--limit` even when the CLI
-    // flag is omitted. Here we only validate the integer shape.
-    const parsedLimit = parsePositiveDecimalInteger("--limit", raw.limit)
-    if (!parsedLimit.ok) return parsedLimit
-    limit = parsedLimit.value
-  }
-
-  return {
-    ok: true,
-    value: {
-      runner,
-      trials,
-      outPath: raw.out,
-      minLift: minLift.value,
-      maxHarm: maxHarm.value,
-      baselinePath: raw.baseline,
-      projectName: raw.project,
-      limit,
-      json: !!raw.json,
-    },
-  }
+  return { ok: true, value: undefined }
 }
 
 export function collectEvalThresholdFailures(
@@ -182,6 +203,14 @@ export function collectEvalThresholdFailures(
   }
 
   return failures
+}
+
+export function hasLongitudinalTaskGateFailures(
+  artifact: LongitudinalTaskArtifact
+): boolean {
+  const fullLoop = artifact.summary.conditions["lore-full-loop"]
+  if (fullLoop.trials > 0) return fullLoop.failed > 0
+  return artifact.summary.failedTrials > 0
 }
 
 function isEvalRunner(value: string): value is EvalRunner {
@@ -364,6 +393,15 @@ evalCommand.addCommand(
               // path from clobbering the canonical one.
             }
           }
+          const compatibility = validateEvalRunRunnerCompatibility(
+            parsed.value.runner,
+            opts
+          )
+          if (!compatibility.ok) {
+            console.error(`Eval failed: ${compatibility.message}`)
+            process.exit(1)
+            return
+          }
           // Post-peek `--limit` gate. The parser only validates the
           // integer shape because peek may flip `parsed.value.runner`
           // from undefined → "bench" via the YAML's runner field; an
@@ -383,40 +421,85 @@ evalCommand.addCommand(
             if (parsed.value.json) {
               console.log(JSON.stringify(artifact, null, 2))
             } else {
-              const status = artifact.summary.failedTasks === 0 ? "passed" : "failed"
-              console.log(
-                `Task eval ${status}: ${artifact.summary.passedTasks}/${artifact.summary.tasks} tasks passed.`
-              )
-              console.log(`Artifact: ${outPath}`)
-              for (const result of artifact.results) {
-                if (!result.success) {
-                  const failed = result.verifiers.filter((v) => !v.passed)
-                  const conditionTag = result.memoryCondition
-                    ? ` [${result.memoryCondition}]`
-                    : ""
-                  console.log(`  - ${result.taskId}${conditionTag}:`)
-                  if (result.agentRun.timedOut) {
-                    console.log(`    agent timed out`)
-                  }
-                  if (result.agentRun.exitCode !== 0) {
-                    console.log(`    agent exit code: ${result.agentRun.exitCode}`)
-                    // Surface the first stderr line so the cost-guardrail
-                    // refusal ("set LORE_EVAL_TASK_REAL=1 to opt in...")
-                    // and other adapter-side messages reach the operator
-                    // instead of disappearing into the artifact.
-                    const firstStderrLine = result.agentRun.stderr
-                      .split("\n")
-                      .map((line) => line.trim())
-                      .find((line) => line.length > 0)
-                    if (firstStderrLine) {
-                      console.log(`    stderr: ${firstStderrLine}`)
+              if (isLongitudinalTaskArtifact(artifact)) {
+                const fullLoop = artifact.summary.conditions["lore-full-loop"]
+                const status = hasLongitudinalTaskGateFailures(artifact)
+                  ? "failed"
+                  : "passed"
+                const headline =
+                  fullLoop.trials > 0
+                    ? `lore-full-loop ${fullLoop.passed}/${fullLoop.trials} passed; overall ${artifact.summary.passedTrials}/${artifact.summary.totalTrials} condition runs passed`
+                    : `${artifact.summary.passedTrials}/${artifact.summary.totalTrials} condition runs passed`
+                console.log(
+                  `Longitudinal task eval ${status}: ${headline}.`
+                )
+                for (const [condition, summary] of Object.entries(
+                  artifact.summary.conditions
+                )) {
+                  console.log(
+                    `  ${condition}: ${summary.passed}/${summary.trials} passed (${(summary.successRate * 100).toFixed(1)}%).`
+                  )
+                }
+                const delta = artifact.summary.lift.successRateDelta
+                console.log(
+                  `  lift delta: ${delta === null ? "n/a" : `${(delta * 100).toFixed(1)} pp`}; ` +
+                    `lifted=${artifact.summary.lift.liftedScenarioIds.length}, ` +
+                    `harmed=${artifact.summary.lift.harmedScenarioIds.length}`
+                )
+                console.log(`Artifact: ${outPath}`)
+                for (const result of artifact.results) {
+                  if (!result.success) {
+                    console.log(`  - ${result.scenarioId} [${result.condition}]:`)
+                    for (const phase of result.phases.filter((p) => !p.success)) {
+                      console.log(
+                        `    ${phase.phase}: ${phase.failureMessage ?? phase.failureReason ?? "failed"}`
+                      )
+                    }
+                    for (const v of result.verifiers.filter((v) => !v.passed)) {
+                      console.log(`    - ${v.message}`)
                     }
                   }
-                  for (const v of failed) console.log(`    - ${v.message}`)
+                }
+              } else {
+                const status = artifact.summary.failedTasks === 0 ? "passed" : "failed"
+                console.log(
+                  `Task eval ${status}: ${artifact.summary.passedTasks}/${artifact.summary.tasks} tasks passed.`
+                )
+                console.log(`Artifact: ${outPath}`)
+                for (const result of artifact.results) {
+                  if (!result.success) {
+                    const failed = result.verifiers.filter((v) => !v.passed)
+                    const conditionTag = result.memoryCondition
+                      ? ` [${result.memoryCondition}]`
+                      : ""
+                    console.log(`  - ${result.taskId}${conditionTag}:`)
+                    if (result.agentRun.timedOut) {
+                      console.log(`    agent timed out`)
+                    }
+                    if (result.agentRun.exitCode !== 0) {
+                      console.log(`    agent exit code: ${result.agentRun.exitCode}`)
+                      // Surface the first stderr line so the cost-guardrail
+                      // refusal ("set LORE_EVAL_TASK_REAL=1 to opt in...")
+                      // and other adapter-side messages reach the operator
+                      // instead of disappearing into the artifact.
+                      const firstStderrLine = result.agentRun.stderr
+                        .split("\n")
+                        .map((line) => line.trim())
+                        .find((line) => line.length > 0)
+                      if (firstStderrLine) {
+                        console.log(`    stderr: ${firstStderrLine}`)
+                      }
+                    }
+                    for (const v of failed) console.log(`    - ${v.message}`)
+                  }
                 }
               }
             }
-            if (artifact.summary.failedTasks > 0) process.exit(1)
+            if (isLongitudinalTaskArtifact(artifact)) {
+              if (hasLongitudinalTaskGateFailures(artifact)) process.exit(1)
+            } else if (artifact.summary.failedTasks > 0) {
+              process.exit(1)
+            }
             return
           }
 

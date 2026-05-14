@@ -1,0 +1,7 @@
+{
+  "name": "lore-longitudinal-result-boundary",
+  "type": "module",
+  "scripts": {
+    "test": "node profile-service.check.mjs"
+  }
+}
