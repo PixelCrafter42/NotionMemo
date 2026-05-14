@@ -3758,8 +3758,8 @@ describe("lore-memory auto-mentions re-emission on update (DEFERRED-03)", () => 
   it("pins the pre-query call boundary at `predicates: ['mentions']` (manual-fact preservation contract)", async () => {
     // Dedicated contract test: the diff-and-invalidate branch only
     // ever invalidates auto-emitted `mentions` facts. That contract
-    // rests on two things: (1) `mentions` is excluded from
-    // `PREDICATE_VALUES` in `tools/knowledge.ts`, so manual
+    // rests on two things: (1) `mentions` is excluded from the
+    // active profile's writable fact predicates, so manual
     // `lore-fact action='create'` calls cannot land a `mentions`
     // row, and (2) the pre-query passes `predicates: ['mentions']`
     // to `queryBySourceMemory`, so the response set never includes
@@ -4026,7 +4026,9 @@ describe("lore-memory auto-mentions re-emission on update (DEFERRED-03)", () => 
     // Both stale facts invalidated by id.
     expect(invalidate).toHaveBeenCalledTimes(2)
     const invalidatedIds = invalidate.mock.calls.map((c) => c[0])
-    expect(invalidatedIds).toEqual(expect.arrayContaining(["fact-old-pr", "fact-old-hash"]))
+    expect(invalidatedIds).toEqual(
+      expect.arrayContaining(["fact-old-pr", "fact-old-hash"])
+    )
     // Fresh `PR #25800` fact emitted (and the `#25800` issue-hash
     // sibling, surfaced by the overlapping issue-hash pattern).
     const objects = createWithDedup.mock.calls.map(
@@ -4675,11 +4677,9 @@ describe("lore-memory auto-mentions re-emission on update (DEFERRED-03)", () => 
     // `expect(decodedUrl).toMatch(/^https:\/\/example\.com/)` form
     // was a tautology — it only verified the fixture string itself,
     // not the extractor's behavior.
-    const candidates = extractEntityCandidates(
-      `Reviewed ${encodedUrl}`,
-      "",
-      ""
-    ).map(decodeTextEntities)
+    const candidates = extractEntityCandidates(`Reviewed ${encodedUrl}`, "", "").map(
+      decodeTextEntities
+    )
     expect(candidates).toContain(decodedUrl)
   })
 })
@@ -7030,9 +7030,7 @@ describe("lore-memory action='save' topic-key upsert (0.9.0/06)", () => {
     const services = {
       projects: { findByName: vi.fn().mockResolvedValue({ id: "proj-a", name: "a" }) },
       topics: {
-        getOrCreate: vi
-          .fn()
-          .mockResolvedValue({ id: "topic-x", name: "Cache Miss" }),
+        getOrCreate: vi.fn().mockResolvedValue({ id: "topic-x", name: "Cache Miss" }),
       },
       memories: {
         update,
@@ -9911,8 +9909,7 @@ describe("lore-memory action='compare' (issue 0.9.0/05)", () => {
     // Track every pages.update call. The first call to `page-b`
     // rejects (simulating the partial-write surface); the second
     // succeeds. Calls to `page-a` always succeed.
-    const updates: Array<{ page_id: string; properties: Record<string, unknown> }> =
-      []
+    const updates: Array<{ page_id: string; properties: Record<string, unknown> }> = []
     let bUpdateCount = 0
     const mockClient = {
       pages: {
@@ -10387,9 +10384,7 @@ describe("lore-memory action='save' — Author attribution (DEFERRED-ATTRIBUTION
   it("stamps services.identity.resolveAuthor on memories.create when args.author is omitted", async () => {
     const { handler, create } = setUpSaveHarness("Test User")
     await handler({ title: "Saved", content: "body" } as never)
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ author: "Test User" })
-    )
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ author: "Test User" }))
   })
 
   it("explicit args.author wins without calling services.identity.resolveAuthor", async () => {
@@ -10697,9 +10692,7 @@ describe("lore-memory auto-mentions scope inheritance (issue #283 round-4)", () 
     expect(invalidate).toHaveBeenCalledWith("fact-old-scope")
     // A new fact gets emitted under sess-NEW.
     expect(createWithDedup).toHaveBeenCalled()
-    const reEmit = createWithDedup.mock.calls.find(
-      (c) => c[0].object === "PR #1234"
-    )
+    const reEmit = createWithDedup.mock.calls.find((c) => c[0].object === "PR #1234")
     expect(reEmit).toBeDefined()
     expect(reEmit?.[0]?.scope).toEqual({ kind: "session", key: "sess-NEW" })
   })

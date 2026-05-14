@@ -2382,10 +2382,10 @@ in parallel.
 
 `mentions` is system-managed, not agent-addressable. The value lives
 on `FactPredicate` for type coverage and on the `Predicate` select
-column for storage, but the `PREDICATE_VALUES` allowlist in
-`tools/knowledge.ts` excludes it — `decided_by` /
-`supersedes_decision` / `informs` get the same treatment. Auto-emitted
-facts ship at `confidence: speculative` so `lore-query action='ask'`
+column for storage, but the active profile's writable fact predicates
+exclude it — `decided_by` / `supersedes_decision` / `informs` get the
+same treatment. Auto-emitted facts ship at `confidence: speculative`
+so `lore-query action='ask'`
 preferentially surfaces agent-curated edges when both exist on the same
 entity.
 
@@ -2452,7 +2452,7 @@ The `predicates: ["mentions"]` filter on the pre-query is
 load-bearing for the "auto-emit only invalidates auto-emitted
 facts" contract — manual `lore-fact action='create'` calls cannot
 land a `mentions` row (the predicate is excluded from
-`PREDICATE_VALUES` in `tools/knowledge.ts`), AND the pre-query
+the active profile's writable fact predicates), AND the pre-query
 filters by predicate at the service boundary so the diff branch
 never sees manual `uses` / `depends_on` / `causes` rows pointing at
 this source memory. A future refactor that loosens the filter

@@ -5,6 +5,8 @@ import {
   FetchBenchExtractionClient,
   SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA,
   SimulatedAutosaveExtractionError,
+  buildSimulatedAutosaveExtractionRequest,
+  buildSimulatedAutosaveExtractionSchema,
   extractSimulatedAutosaveMemories,
   normalizeSimulatedAutosaveMemories,
   type BenchExtractionClient,
@@ -16,11 +18,11 @@ class StubExtractionClient implements BenchExtractionClient {
   constructor(
     private readonly responses: Array<
       Awaited<ReturnType<BenchExtractionClient["complete"]>>
-    >,
+    >
   ) {}
 
   async complete(
-    input: Parameters<BenchExtractionClient["complete"]>[0],
+    input: Parameters<BenchExtractionClient["complete"]>[0]
   ): ReturnType<BenchExtractionClient["complete"]> {
     this.calls += 1
     this.inputs.push(input)
@@ -47,6 +49,46 @@ describe("simulated-autosave structured output schema", () => {
       ...TAG_VOCABULARY,
     ])
   })
+
+  it("can build a schema from a supplied profile tag vocabulary", () => {
+    const schema = buildSimulatedAutosaveExtractionSchema(["alpha", "beta"])
+    const properties = schema.properties as {
+      memories: {
+        items: {
+          properties: {
+            tags: {
+              items: { enum: string[] }
+            }
+          }
+        }
+      }
+    }
+    expect(properties.memories.items.properties.tags.items.enum).toEqual([
+      "alpha",
+      "beta",
+    ])
+  })
+
+  it("threads profile tags into the extraction request schema", () => {
+    const request = buildSimulatedAutosaveExtractionRequest({
+      extractionPrompt: "extract",
+      transcript: "hello",
+      tagVocabulary: ["alpha"],
+    })
+    const schema = request.response_format.json_schema.schema
+    const properties = schema.properties as {
+      memories: {
+        items: {
+          properties: {
+            tags: {
+              items: { enum: string[] }
+            }
+          }
+        }
+      }
+    }
+    expect(properties.memories.items.properties.tags.items.enum).toEqual(["alpha"])
+  })
 })
 
 describe("FetchBenchExtractionClient", () => {
@@ -55,29 +97,30 @@ describe("FetchBenchExtractionClient", () => {
   })
 
   it("returns finish reason, refusal, and OpenAI-reported usage", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          choices: [
-            {
-              finish_reason: "length",
-              message: { content: null, refusal: "cannot comply" },
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "length",
+                message: { content: null, refusal: "cannot comply" },
+              },
+            ],
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 2,
+              prompt_tokens_details: { cached_tokens: 4 },
             },
-          ],
-          usage: {
-            prompt_tokens: 10,
-            completion_tokens: 2,
-            prompt_tokens_details: { cached_tokens: 4 },
-          },
-        }),
-        { status: 200, statusText: "OK" },
-      )
+          }),
+          { status: 200, statusText: "OK" }
+        )
     )
     vi.stubGlobal("fetch", fetchMock)
     const client = new FetchBenchExtractionClient(
       "sk-test",
       "https://openai.test/v1",
-      async () => {},
+      async () => {}
     )
 
     const result = await client.complete({
@@ -157,7 +200,7 @@ describe("extractSimulatedAutosaveMemories", () => {
         client,
         extractionPrompt: "extract",
         transcript: "User: hi",
-      }),
+      })
     ).rejects.toMatchObject({
       name: "SimulatedAutosaveExtractionError",
       usage: {
@@ -206,9 +249,32 @@ describe("normalizeSimulatedAutosaveMemories", () => {
     expect(plans[0]?.createInput.keywords).toContain("Notion API")
     expect(plans[0]?.createInput.keywords).toContain("personal")
     expect(plans[0]?.createInput.keywords?.length).toBeLessThanOrEqual(
-      RICH_TEXT_PROPERTY_MAX_LEN,
+      RICH_TEXT_PROPERTY_MAX_LEN
     )
     expect(plans[0]?.mentionEntities).toEqual(["Notion API", "New York"])
+  })
+
+  it("normalizes tags against a supplied profile vocabulary", () => {
+    const plans = normalizeSimulatedAutosaveMemories({
+      projectId: "project-1",
+      sessionId: "session-1",
+      tagVocabulary: ["alpha"],
+      raw: {
+        memories: [
+          {
+            title: "Profile tag",
+            synopsis: "",
+            keywords: "",
+            tags: ["alpha", "backend"],
+            content: "content",
+            entities: [],
+          },
+        ],
+      },
+    })
+
+    expect(plans[0]?.createInput.tags).toEqual(["alpha"])
+    expect(plans[0]?.createInput.keywords).toContain("backend")
   })
 
   it("drops records with empty title or content after trimming", () => {

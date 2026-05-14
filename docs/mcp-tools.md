@@ -11,7 +11,7 @@ removed in the 0.6.0 deprecation purge; see
 
 | Action    | Description                                                                                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`  | Show vault status, topology health when configured, database counts, active project, task summary, proposed-memory inbox count, wake-up coverage counters, configured projects, and background hook failure markers |
+| `status`  | Show vault status, active profile, topology health when configured, database counts, active project, task summary, proposed-memory inbox count, wake-up coverage counters, configured projects, and background hook failure markers |
 | `wake-up` | Load latest digest, ranked/recent memories, tasks, active facts, decisions needing attention, memories related to active tasks, and inherited upstream memories per configured `upstreamVaults` entry (issue #286 — sparse and labeled per upstream, bounded per `inheritedMemoryLimit` default 3; failed upstreams render as `> upstream unavailable: <message>` without suppressing surviving sections) |
 | `digest`  | Gather raw activity data for synthesis into a `source: "digest"` memory                                                            |
 
@@ -55,6 +55,10 @@ Pass `debug: true` to `wake-up` when investigating why a context load is too
 thin or too noisy. The response appends privacy-conscious coverage counters
 for mode, caps, section counts, and digest age; it does not include titles,
 facts, memory bodies, or the raw `userQuery`.
+
+The active profile controls write-time tag validation, entity kind options,
+and writable fact predicates. Tag read filters remain permissive so agents can
+find legacy or out-of-profile rows. See [`profiles.md`](profiles.md).
 
 ## `lore-memory` — memory mutations + batch hydration
 

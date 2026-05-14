@@ -16,6 +16,85 @@ import {
   TOPIC_PROPS,
   topicsProperties,
 } from "./schema.js"
+import { resolveProfileFromConfig } from "../profile/index.js"
+
+describe("schema factories — profile overlays", () => {
+  it("uses the default profile taxonomy for Notion select options", () => {
+    const profile = resolveProfileFromConfig({})
+    const memories = memoriesProperties("p-ds", "t-ds", "m-ds", profile)
+    const entities = entitiesProperties("p-ds", "m-ds", profile)
+    const facts = factsProperties("p-ds", "m-ds", "e-ds", profile)
+
+    expect(
+      (
+        memories[MEMORY_PROPS.TAGS].multi_select as {
+          options: Array<{ name: string }>
+        }
+      ).options.map((option) => option.name)
+    ).toContain("architecture")
+    expect(
+      (
+        entities[ENTITY_PROPS.KIND].select as {
+          options: Array<{ name: string }>
+        }
+      ).options.map((option) => option.name)
+    ).toEqual([
+      "class",
+      "function",
+      "file",
+      "workflow",
+      "pr",
+      "task-id",
+      "person",
+      "system",
+    ])
+    expect(
+      (
+        facts[FACT_PROPS.PREDICATE].select as {
+          options: Array<{ name: string }>
+        }
+      ).options.map((option) => option.name)
+    ).toEqual([
+      "is_a",
+      "has_a",
+      "related_to",
+      "uses",
+      "depends_on",
+      "created_by",
+      "owned_by",
+      "replaces",
+      "extends",
+      "conflicts_with",
+      "needs_action",
+      "waiting_on",
+      "blocked_by",
+      "decided_by",
+      "supersedes_decision",
+      "informs",
+      "mentions",
+    ])
+  })
+
+  it("merges additive schema properties without changing core properties", () => {
+    const schema = {
+      projects: { Domain: { rich_text: {} } },
+      topics: {},
+      memories: { Severity: { select: { options: [{ name: "high" }] } } },
+      entities: {},
+      facts: {},
+    }
+
+    const projects = projectsProperties(schema)
+    const memories = memoriesProperties("p-ds", "t-ds", "m-ds", schema)
+
+    expect(projects[PROJECT_PROPS.NAME]).toEqual({ title: {} })
+    expect(projects.Domain).toEqual({ rich_text: {} })
+    expect(memories[MEMORY_PROPS.TAGS]).toEqual({ multi_select: { options: [] } })
+    expect(memories.Severity).toEqual({
+      select: { options: [{ name: "high" }] },
+    })
+  })
+})
 
 describe("memoriesProperties — Last Referenced At column (0.8.0/02)", () => {
   it("declares Last Referenced At as a date column on a fresh-vault config", () => {
@@ -52,10 +131,10 @@ describe("buildMemoryProps — lastReferencedAt emission", () => {
   })
 
   it("emits a date-with-start when lastReferencedAt is a YYYY-MM-DD string", () => {
-    const built = buildMemoryProps({ title: "x", lastReferencedAt: "2026-04-29" }) as Record<
-      string,
-      { date: { start: string } | null }
-    >
+    const built = buildMemoryProps({
+      title: "x",
+      lastReferencedAt: "2026-04-29",
+    }) as Record<string, { date: { start: string } | null }>
     expect(built["Last Referenced At"]).toEqual({ date: { start: "2026-04-29" } })
   })
 
@@ -523,7 +602,7 @@ describe("buildMemoryProps — comparedWith + compareNotes emission (0.9.0/02)",
     // there is no path that produces an over-cap rich_text payload.
     const overCap = "a".repeat(COMPARE_NOTES_MAX_CHARS + 1)
     expect(() => buildMemoryProps({ title: "x", compareNotes: overCap })).toThrow(
-      /Compare Notes overflow/,
+      /Compare Notes overflow/
     )
   })
 })
@@ -649,7 +728,7 @@ describe("memoriesProperties — Status select options (issue #281)", () => {
         "superseded",
         "deprecated",
         "rejected",
-      ]),
+      ])
     )
   })
 })
@@ -669,7 +748,7 @@ describe("*_PROPS constants match the schema-builder definitions (issue #482)", 
     {
       name: "PROJECT_PROPS / projectsProperties",
       constantValues: new Set<string>(Object.values(PROJECT_PROPS)),
-      schemaKeys: new Set(Object.keys(projectsProperties)),
+      schemaKeys: new Set(Object.keys(projectsProperties())),
     },
     {
       name: "TOPIC_PROPS / topicsProperties",
@@ -699,14 +778,14 @@ describe("*_PROPS constants match the schema-builder definitions (issue #482)", 
   for (const scenario of SCENARIOS) {
     it(`${scenario.name}: every constant value maps to a schema column`, () => {
       const orphanConstants = [...scenario.constantValues].filter(
-        (value) => !scenario.schemaKeys.has(value),
+        (value) => !scenario.schemaKeys.has(value)
       )
       expect(orphanConstants).toEqual([])
     })
 
     it(`${scenario.name}: every schema column has a constant`, () => {
       const orphanColumns = [...scenario.schemaKeys].filter(
-        (key) => !scenario.constantValues.has(key),
+        (key) => !scenario.constantValues.has(key)
       )
       expect(orphanColumns).toEqual([])
     })

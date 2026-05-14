@@ -1,15 +1,9 @@
 import { z } from "zod"
-import {
-  SYNOPSIS_MAX,
-  TAG_VOCABULARY,
-  type CreateMemoryInput,
-  type Tag,
-} from "../types.js"
+import { SYNOPSIS_MAX, TAG_VOCABULARY, type CreateMemoryInput } from "../types.js"
 import { RICH_TEXT_PROPERTY_MAX_LEN } from "../core/rich-text-schema.js"
 import { MAX_AUTO_MENTION_ENTITIES } from "../core/auto-mentions.js"
 
-export const SIMULATED_AUTOSAVE_EXTRACTION_MODEL =
-  "gpt-4o-mini-2024-07-18"
+export const SIMULATED_AUTOSAVE_EXTRACTION_MODEL = "gpt-4o-mini-2024-07-18"
 export const SIMULATED_AUTOSAVE_EXTRACTION_TEMPERATURE = 0
 export const SIMULATED_AUTOSAVE_EXTRACTION_MAX_TOKENS = 1000
 export const SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA_VERSION = 1
@@ -59,7 +53,7 @@ export interface ExtractedBenchMemory {
   title: string
   synopsis: string
   keywords: string
-  tags: Tag[]
+  tags: string[]
   content: string
   entities: string[]
 }
@@ -77,7 +71,7 @@ export interface ExtractSimulatedAutosaveMemoriesResult {
 export class SimulatedAutosaveExtractionError extends Error {
   constructor(
     message: string,
-    public readonly usage: BenchExtractionUsage = zeroExtractionUsage(),
+    public readonly usage: BenchExtractionUsage = zeroExtractionUsage()
   ) {
     super(message)
     this.name = "SimulatedAutosaveExtractionError"
@@ -103,39 +97,46 @@ export function addExtractionUsage(
   }
 }
 
-export const SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  required: ["memories"],
-  properties: {
-    memories: {
-      type: "array",
-      maxItems: 8,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["title", "synopsis", "keywords", "tags", "content", "entities"],
-        properties: {
-          title: { type: "string" },
-          synopsis: { type: "string" },
-          keywords: { type: "string" },
-          tags: {
-            type: "array",
-            items: {
-              type: "string",
-              enum: [...TAG_VOCABULARY],
+export function buildSimulatedAutosaveExtractionSchema(
+  tagVocabulary: readonly string[] = TAG_VOCABULARY
+): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["memories"],
+    properties: {
+      memories: {
+        type: "array",
+        maxItems: 8,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title", "synopsis", "keywords", "tags", "content", "entities"],
+          properties: {
+            title: { type: "string" },
+            synopsis: { type: "string" },
+            keywords: { type: "string" },
+            tags: {
+              type: "array",
+              items: {
+                type: "string",
+                enum: [...tagVocabulary],
+              },
             },
-          },
-          content: { type: "string" },
-          entities: {
-            type: "array",
-            items: { type: "string" },
+            content: { type: "string" },
+            entities: {
+              type: "array",
+              items: { type: "string" },
+            },
           },
         },
       },
     },
-  },
+  }
 }
+
+export const SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA: Record<string, unknown> =
+  buildSimulatedAutosaveExtractionSchema()
 
 const rawExtractedBenchMemorySchema = z
   .object({
@@ -159,6 +160,7 @@ export function buildSimulatedAutosaveExtractionRequest(input: {
   transcript: string
   model?: string
   maxTokens?: number
+  tagVocabulary?: readonly string[]
 }): Parameters<BenchExtractionClient["complete"]>[0] {
   return {
     model: input.model ?? SIMULATED_AUTOSAVE_EXTRACTION_MODEL,
@@ -173,7 +175,7 @@ export function buildSimulatedAutosaveExtractionRequest(input: {
       json_schema: {
         name: "longmemeval_simulated_autosave",
         strict: true,
-        schema: SIMULATED_AUTOSAVE_EXTRACTION_SCHEMA,
+        schema: buildSimulatedAutosaveExtractionSchema(input.tagVocabulary),
       },
     },
   }
@@ -184,7 +186,7 @@ export class FetchBenchExtractionClient implements BenchExtractionClient {
     private readonly apiKey: string,
     private readonly baseUrl: string = "https://api.openai.com/v1",
     private readonly sleep: (ms: number) => Promise<void> = (ms) =>
-      new Promise((resolve) => setTimeout(resolve, ms)),
+      new Promise((resolve) => setTimeout(resolve, ms))
   ) {}
 
   async complete(
@@ -205,7 +207,7 @@ export class FetchBenchExtractionClient implements BenchExtractionClient {
       }
       if (!response.ok) {
         throw new Error(
-          `OpenAI extraction failed: HTTP ${response.status} ${response.statusText}`,
+          `OpenAI extraction failed: HTTP ${response.status} ${response.statusText}`
         )
       }
       let json: {
@@ -230,19 +232,14 @@ export class FetchBenchExtractionClient implements BenchExtractionClient {
       const choice = json.choices?.[0]
       return {
         content:
-          typeof choice?.message?.content === "string"
-            ? choice.message.content
-            : null,
+          typeof choice?.message?.content === "string" ? choice.message.content : null,
         finishReason:
           typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
         refusal:
-          typeof choice?.message?.refusal === "string"
-            ? choice.message.refusal
-            : null,
+          typeof choice?.message?.refusal === "string" ? choice.message.refusal : null,
         usage: {
           promptTokens: json.usage?.prompt_tokens ?? 0,
-          cachedPromptTokens:
-            json.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+          cachedPromptTokens: json.usage?.prompt_tokens_details?.cached_tokens ?? 0,
           completionTokens: json.usage?.completion_tokens ?? 0,
         },
       }
@@ -276,6 +273,7 @@ export async function extractSimulatedAutosaveMemories(input: {
   transcript: string
   model?: string
   maxTokens?: number
+  tagVocabulary?: readonly string[]
 }): Promise<ExtractSimulatedAutosaveMemoriesResult> {
   let usage = zeroExtractionUsage()
   let lastFailure = "unknown extraction failure"
@@ -292,6 +290,7 @@ export async function extractSimulatedAutosaveMemories(input: {
           transcript: input.transcript,
           model: input.model,
           maxTokens: input.maxTokens,
+          tagVocabulary: input.tagVocabulary,
         })
       )
     } catch (err) {
@@ -317,7 +316,7 @@ export async function extractSimulatedAutosaveMemories(input: {
   }
   throw new SimulatedAutosaveExtractionError(
     `Simulated-autosave extraction failed: ${lastFailure}`,
-    usage,
+    usage
   )
 }
 
@@ -373,6 +372,7 @@ export function normalizeSimulatedAutosaveMemories(input: {
   raw: RawSimulatedAutosaveExtraction
   projectId: string
   sessionId: string
+  tagVocabulary?: readonly string[]
 }): SimulatedAutosaveMemoryPlan[] {
   return input.raw.memories
     .map((memory) =>
@@ -380,6 +380,7 @@ export function normalizeSimulatedAutosaveMemories(input: {
         memory,
         projectId: input.projectId,
         sessionId: input.sessionId,
+        tagVocabulary: input.tagVocabulary,
       })
     )
     .filter((memory): memory is SimulatedAutosaveMemoryPlan => memory !== null)
@@ -389,21 +390,21 @@ function normalizeSimulatedAutosaveMemory(input: {
   memory: RawExtractedBenchMemory
   projectId: string
   sessionId: string
+  tagVocabulary?: readonly string[]
 }): SimulatedAutosaveMemoryPlan | null {
   const title = capString(cleanText(input.memory.title), 80)
   const content = cleanText(input.memory.content)
   if (title.length === 0 || content.length === 0) return null
 
   const synopsis = capString(cleanText(input.memory.synopsis), SYNOPSIS_MAX)
-  const { tags, invalidTags } = normalizeTags(input.memory.tags)
+  const { tags, invalidTags } = normalizeTags(
+    input.memory.tags,
+    input.tagVocabulary ?? TAG_VOCABULARY
+  )
   const mentionEntities = normalizeEntities(input.memory.entities)
   const keywords = capString(
-    normalizeKeywordString([
-      input.memory.keywords,
-      ...mentionEntities,
-      ...invalidTags,
-    ]),
-    RICH_TEXT_PROPERTY_MAX_LEN,
+    normalizeKeywordString([input.memory.keywords, ...mentionEntities, ...invalidTags]),
+    RICH_TEXT_PROPERTY_MAX_LEN
   )
 
   return {
@@ -425,11 +426,14 @@ function normalizeSimulatedAutosaveMemory(input: {
   }
 }
 
-function normalizeTags(tags: string[]): { tags: Tag[]; invalidTags: string[] } {
-  const vocab = new Set<string>(TAG_VOCABULARY)
+function normalizeTags(
+  tags: string[],
+  vocabulary: readonly string[]
+): { tags: string[]; invalidTags: string[] } {
+  const vocab = new Set<string>(vocabulary)
   const seenTags = new Set<string>()
   const seenInvalid = new Set<string>()
-  const out: Tag[] = []
+  const out: string[] = []
   const invalid: string[] = []
   for (const tag of tags) {
     const normalized = cleanText(tag).toLowerCase()
@@ -437,7 +441,7 @@ function normalizeTags(tags: string[]): { tags: Tag[]; invalidTags: string[] } {
     if (vocab.has(normalized)) {
       if (!seenTags.has(normalized)) {
         seenTags.add(normalized)
-        out.push(normalized as Tag)
+        out.push(normalized)
       }
     } else if (!seenInvalid.has(normalized)) {
       seenInvalid.add(normalized)

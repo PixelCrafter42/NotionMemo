@@ -147,7 +147,8 @@ export const digestCommand = new Command("digest")
           digest.raw,
           projectLabel,
           isoDate(new Date()),
-          digest.lastDigestDate
+          digest.lastDigestDate,
+          { profilePrompts: services.profile?.prompts }
         )
 
         const spawnCwd = resolveSpawnCwd(services.configRoot, projectConfigPath)

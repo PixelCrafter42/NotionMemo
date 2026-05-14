@@ -1,0 +1,11 @@
+databases:
+  projects:
+    properties: {}
+  topics:
+    properties: {}
+  memories:
+    properties: {}
+  entities:
+    properties: {}
+  facts:
+    properties: {}

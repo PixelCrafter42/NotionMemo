@@ -6,6 +6,7 @@
 
 import type { Client } from "@notionhq/client"
 import type { Vault, VaultDatabases } from "../types.js"
+import { resolveProfileFromConfig, type ResolvedProfile } from "../profile/index.js"
 import {
   createVaultDatabases,
   migrateVaultSchema,
@@ -69,7 +70,8 @@ export class VaultManager {
 
   constructor(
     private client: Client,
-    private pageId: string
+    private pageId: string,
+    private profile: ResolvedProfile = resolveProfileFromConfig({})
   ) {}
 
   async init(): Promise<Vault> {
@@ -90,7 +92,7 @@ export class VaultManager {
       }
     }
 
-    this.vault = await createVaultDatabases(this.client, this.pageId)
+    this.vault = await createVaultDatabases(this.client, this.pageId, this.profile)
     return this.vault
   }
 
@@ -125,25 +127,22 @@ export class VaultManager {
    */
   private async detectDrift(): Promise<void> {
     if (!this.vault) return
-    const diffs = await migrateVaultSchema(this.client, this.vault, { dryRun: true })
+    const diffs = await migrateVaultSchema(this.client, this.vault, {
+      dryRun: true,
+      profile: this.profile,
+    })
     const duplicates = await findDuplicateTopicNames(
       this.client,
       this.vault.databases.topics
     )
-    const encoded = await findEncodedTopicNames(
-      this.client,
-      this.vault.databases.topics
-    )
+    const encoded = await findEncodedTopicNames(this.client, this.vault.databases.topics)
 
     const missingProps = diffs.reduce((n, d) => n + d.missing.length, 0)
     const missingOptions = diffs.reduce(
       (n, d) => n + d.addedOptions.reduce((m, a) => m + a.options.length, 0),
       0
     )
-    const relationUpgrades = diffs.reduce(
-      (n, d) => n + d.addedRelationConfig.length,
-      0
-    )
+    const relationUpgrades = diffs.reduce((n, d) => n + d.addedRelationConfig.length, 0)
     const duplicateRowCount = duplicates.reduce((n, d) => n + d.topicIds.length, 0)
 
     if (
@@ -187,7 +186,9 @@ export class VaultManager {
       hints.length > 0
         ? `Run \`lore migrate ${hints.join(" ")}\` to update your vault.`
         : "Run `lore migrate` to update your vault."
-    console.error(`[lore] Schema drift detected: ${parts.join(" and ")} out of date. ${hint}`)
+    console.error(
+      `[lore] Schema drift detected: ${parts.join(" and ")} out of date. ${hint}`
+    )
   }
 
   get(): Vault {
@@ -241,10 +242,7 @@ export class VaultManager {
     } = {}
   ): Promise<VaultMigrateResult> {
     const vault = this.get()
-    const encodedTopics = await findEncodedTopicNames(
-      this.client,
-      vault.databases.topics
-    )
+    const encodedTopics = await findEncodedTopicNames(this.client, vault.databases.topics)
 
     // Validate all preconditions BEFORE writing anything. If the vault has
     // cross-encoding pairs (e.g. `Build & Tooling` next to a legacy
@@ -302,9 +300,7 @@ export class VaultManager {
           .map((g) => `"${g.name}" (${g.topicIds.length} rows)`)
           .join(", ")
         const more =
-          duplicateTopics.length > 5
-            ? `, and ${duplicateTopics.length - 5} more`
-            : ""
+          duplicateTopics.length > 5 ? `, and ${duplicateTopics.length - 5} more` : ""
         throw new Error(
           `${duplicateTopics.length} duplicate-name topic group${duplicateTopics.length === 1 ? "" : "s"} detected: ${preview}${more}. ` +
             "Re-run with `--merge-duplicate-topics` to merge each group into a canonical topic before upgrading the schema."
@@ -320,6 +316,7 @@ export class VaultManager {
 
     const diffs = await migrateVaultSchema(this.client, vault, {
       dryRun: options.dryRun,
+      profile: this.profile,
     })
     return {
       diffs,
@@ -376,17 +373,12 @@ export class VaultManager {
    * sibling rows, which is harder to roll back than the exact-name
    * case where the surviving canonical's name was unchanged.
    */
-  async migrateSimilarTopics(
-    options: { dryRun?: boolean } = {}
-  ): Promise<{
+  async migrateSimilarTopics(options: { dryRun?: boolean } = {}): Promise<{
     groups: SimilarTopicGroup[]
     mergeResults: SimilarTopicMergeResult[]
   }> {
     const vault = this.get()
-    const groups = await findSimilarTopicGroups(
-      this.client,
-      vault.databases.topics
-    )
+    const groups = await findSimilarTopicGroups(this.client, vault.databases.topics)
     const mergeResults = await mergeSimilarTopics(
       this.client,
       vault.databases.topics,

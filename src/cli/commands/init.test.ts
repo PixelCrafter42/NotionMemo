@@ -76,6 +76,7 @@ import {
   runNtnLogin,
 } from "../../auth/ntn.js"
 import { VaultManager } from "../../core/vault.js"
+import { defaultProfileSelector } from "../../profile/index.js"
 import { confirmPrompt } from "./init-prompt.js"
 
 describe("buildInitConfigYaml", () => {
@@ -84,6 +85,7 @@ describe("buildInitConfigYaml", () => {
     const parsed = yamlParse(text)
     expect(parsed).toEqual({
       vault: { pageId: "abc123" },
+      profile: defaultProfileSelector(),
       projects: [],
       hooks: {
         autoSave: true,
@@ -232,6 +234,7 @@ describe("buildInitConfigYaml", () => {
     const parsed = yamlParse(text)
     expect(parsed).toEqual({
       vault: { pageId: "abc123" },
+      profile: defaultProfileSelector(),
       projects: [],
       hooks: {
         autoSave: true,
@@ -254,6 +257,7 @@ describe("buildInitConfigYaml", () => {
     // The rest of the shape is unchanged.
     expect(parsed).toMatchObject({
       vault: { pageId: "abc123" },
+      profile: defaultProfileSelector(),
       auth: { workspaceId: "ws-team-engineering" },
       projects: [],
       hooks: {

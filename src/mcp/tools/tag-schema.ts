@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { TAG_VOCABULARY } from "../../types.js"
+import { DEFAULT_TAG_VOCABULARY, TAG_VOCABULARY } from "../../types.js"
 
 /**
  * Shared Zod schemas for the closed `tags` vocabulary and free-form
@@ -13,9 +13,6 @@ import { TAG_VOCABULARY } from "../../types.js"
  * that's where listing the vocabulary is actually useful.
  */
 
-/** Pre-computed once: every schema construction would otherwise re-join. */
-const VOCAB_CSV = TAG_VOCABULARY.join(", ")
-
 /** Notion rich_text caps at 2000 chars per segment. Fail at Zod, not Notion. */
 const KEYWORDS_MAX_LEN = 2000
 
@@ -24,22 +21,25 @@ const KEYWORDS_MAX_LEN = 2000
  * names the bad values, lists the accepted vocabulary, and points at the
  * `keywords` field for free-form labels.
  */
-const tagArraySchema = z
-  .array(z.string())
-  .superRefine((tags, ctx) => {
-    const vocab = new Set<string>(TAG_VOCABULARY)
+export function createTagsSchema(vocabulary: readonly string[] = DEFAULT_TAG_VOCABULARY) {
+  const vocabCsv = vocabulary.join(", ")
+  return z.array(z.string()).superRefine((tags, ctx) => {
+    const vocab = new Set<string>(vocabulary)
     const invalid = tags.filter((t) => !vocab.has(t))
     if (invalid.length === 0) return
     const quoted = invalid.map((t) => `"${t}"`).join(", ")
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:
-        `Tag${invalid.length === 1 ? "" : "s"} ${quoted} not in the closed vocabulary. ` +
-        `Accepted tags: ${VOCAB_CSV}. ` +
+        `Tag${invalid.length === 1 ? "" : "s"} ${quoted} not in the active profile vocabulary. ` +
+        `Accepted tags: ${vocabCsv}. ` +
         `For PR numbers, ticket IDs, file paths, class/function names, or any other ` +
         `free-form label, use \`keywords\` instead (e.g. keywords: "pr-1234 ThreadStore.swift").`,
     })
   })
+}
+
+const tagArraySchema = createTagsSchema(TAG_VOCABULARY)
 
 /**
  * Zod schema for `tags` on memory-writing tools. Accepts only values from

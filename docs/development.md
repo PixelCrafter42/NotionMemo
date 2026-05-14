@@ -83,6 +83,10 @@ This project uses `@notionhq/client` v5.x. Do not use v4 patterns.
   [`docs/authentication.md`](authentication.md).
 - Config is validated with Zod at load time, including refusal of
   bearer-shaped `auth.token` values in `.lore.yaml`.
+- `profile` is optional in `.lore.yaml`; omission resolves in memory to the
+  runtime default selector from `profiles/default/profile.yaml`. New
+  `lore init` configs write that selector explicitly. See
+  [`profiles.md`](profiles.md).
 - `configRoot`, the directory containing `.lore.yaml`, is the base for relative
   project paths.
 - `upstreamVaults` and `promotionTargets` describe optional multi-vault

@@ -39,6 +39,19 @@ export type {
 
 export { findConfigFile, loadConfig, resolveToken, resolveAuth } from "./config.js"
 export type { AuthSource, ResolvedAuth } from "./config.js"
+export {
+  defaultProfileSelector,
+  loadProfileFromRoot,
+  parseProfileSelector,
+  resolveProfileFromConfig,
+} from "./profile/index.js"
+export type {
+  ProfileManifest,
+  ResolvedProfile,
+  ResolvedProfileSchema,
+  ResolvedProfileTaxonomy,
+  ResolvedPromptRegistry,
+} from "./profile/index.js"
 export { createClient } from "./notion/client.js"
 export { createVaultDatabases, verifyVaultDatabases } from "./notion/setup.js"
 export { VaultManager } from "./core/vault.js"

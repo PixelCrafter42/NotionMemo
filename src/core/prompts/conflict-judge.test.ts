@@ -3,9 +3,10 @@ import {
   CONFLICT_JUDGE_PROMPT_VERSION,
   renderConflictJudgePrompt,
 } from "./conflict-judge.js"
+import { resolveProfileFromConfig } from "../../profile/index.js"
 
 describe("CONFLICT_JUDGE_PROMPT_VERSION", () => {
-  it("is the string \"1\"", () => {
+  it('is the string "1"', () => {
     // Bumping this constant intentionally breaks the snapshot test
     // below — that is the forcing function. A version change must
     // be paired with a snapshot update in the same PR.
@@ -164,6 +165,16 @@ describe("renderConflictJudgePrompt", () => {
     // from engram's `internal/llm/prompt.go` — see the file header
     // for the rationale.
     expect(renderConflictJudgePrompt(input)).toMatchSnapshot()
+  })
+
+  it("renders the default profile prompt template byte-identically", () => {
+    const profile = resolveProfileFromConfig({})
+    const core = renderConflictJudgePrompt(input)
+    const profiled = renderConflictJudgePrompt(input, {
+      template: profile.prompts.conflictJudge.text,
+    })
+
+    expect(profiled).toBe(core)
   })
 
   it("is stable across calls for stable input", () => {

@@ -278,15 +278,15 @@ The `isFullPage()` type guard narrows `QueryDataSourceResponse` results to
    used by core services when creating or updating pages. Same posture:
    the builders write through `*_PROPS` constants.
 
-Databases that have relations to other databases use functions (not constants) so
-the related database ID can be passed in:
+Database schema configs are exposed as functions so relation IDs and the active
+profile can be passed explicitly:
 
 ```typescript
-// Static (no relations)
-export const projectsProperties: PropertyConfig = { ... }
+// No relations, but profile additives may still apply.
+export function projectsProperties(profile?: ResolvedProfile): PropertyConfig { ... }
 
 // Dynamic (needs related DB IDs)
-export function memoriesProperties(projectsDbId: string, topicsDbId: string): PropertyConfig { ... }
+export function memoriesProperties(projectsDbId: string, topicsDbId: string, memoriesDsId?: string, profile?: ResolvedProfile): PropertyConfig { ... }
 ```
 
 ## Vault Setup

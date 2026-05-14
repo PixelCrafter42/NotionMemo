@@ -4,7 +4,6 @@ import type { LoreServices } from "../server.js"
 import { formatDispatchError, toolError } from "../helpers.js"
 import { handleRecall, handleSearch } from "./memory.js"
 import { handleAsk, handleAudit } from "./knowledge.js"
-import { tagsSchema } from "./tag-schema.js"
 import { ymdDateSchema } from "./date-schema.js"
 
 // The closed set of `MemoryKind` values that `lore-query action='recall'`
@@ -84,11 +83,7 @@ export const queryDispatchSchema = z.discriminatedUnion("action", [
     query: z.string(),
     projectName: z.string().optional(),
     topicName: z.string().optional(),
-    // Closed-vocab tags here too: the inner discriminated union is the
-    // dispatcher's runtime contract, and it must match the closed-vocab
-    // guarantee declared at the MCP boundary so agents can't smuggle
-    // out-of-vocab tags through the polymorphic dispatch path.
-    tags: tagsSchema.optional(),
+    tags: z.array(z.string().trim().min(1)).optional(),
     kind: z.enum(KINDS).optional(),
     status: z.enum(STATUSES).optional(),
     limit: z.number().int().min(1).max(50).optional(),
@@ -106,10 +101,7 @@ export const queryDispatchSchema = z.discriminatedUnion("action", [
     // circuits to `[]`, but failing here gives the agent
     // a clear "entity is required" error instead of an empty result
     // set masquerading as "no facts found".
-    entity: z
-      .string()
-      .trim()
-      .min(1, "entity must be a non-empty string"),
+    entity: z.string().trim().min(1, "entity must be a non-empty string"),
     projectName: z.string().optional(),
     limit: z.number().int().min(1).optional(),
     includeContext: z.boolean().optional(),
@@ -200,12 +192,13 @@ export function registerQueryTools(server: McpServer, services: LoreServices): v
             "(action='recall') Only return memories with `Review By` on or before."
           ),
         // search only
-        tags: tagsSchema
+        tags: z
+          .array(z.string().trim().min(1))
           .optional()
           .describe(
-            "(action='search') Filter by closed-vocabulary tags (matches any). " +
+            "(action='search') Filter by tag strings (matches any). " +
               "Server-side filter in `contains`/`hybrid`; post-filter in `semantic`. " +
-              "For free-form keyword filtering, use `query`."
+              "Read filters accept legacy and out-of-profile tags; for free-form keyword filtering, use `query`."
           ),
         // search only
         mode: z

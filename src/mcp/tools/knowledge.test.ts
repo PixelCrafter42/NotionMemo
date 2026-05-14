@@ -1492,10 +1492,10 @@ describe("lore-fact action='invalidate' — issue #284 sourceMemoryId threading"
 
 describe("lore-fact action='create' — tracking-predicate Zod rejection", () => {
   // Acceptance criterion (#23, line 452-455): the contracted
-  // `FactPredicate` union drives the Zod enum at the dispatcher
+  // active profile's writable predicate list drives validation at the dispatcher
   // boundary, so each tracking predicate string fails at parse time
   // rather than via the deleted `trackingPredicateRedirect` helper.
-  // Pin all three values so widening `PREDICATE_VALUES` (intentionally
+  // Pin all three values so widening the writable list (intentionally
   // or by paste) shows up as failing tests.
   function makeServices() {
     const createWithDedup = vi.fn()
@@ -1766,9 +1766,9 @@ describe("lore-learn sourceMemoryId discipline", () => {
     return {
       projects: { findByName: vi.fn() },
       memories: {
-        getPropertiesById: vi.fn().mockImplementation(async (id: string) =>
-          makeSourceMemory(id)
-        ),
+        getPropertiesById: vi
+          .fn()
+          .mockImplementation(async (id: string) => makeSourceMemory(id)),
       },
       facts: {
         create: vi.fn().mockImplementation(async (input) =>
@@ -1829,26 +1829,29 @@ describe("lore-learn sourceMemoryId discipline", () => {
     ["agent only", { agent: "claude" }],
     ["session only", { session: "session-abc" }],
     ["whitespace session", { agent: "claude", session: "  " }],
-  ])("rejects malformed session provenance at the schema boundary: %s", async (_name, partial) => {
-    const mockServer = createMockServer()
-    const services = makeServices()
-    registerKnowledgeTools(mockServer.server, services as never)
-    registerQueryTools(mockServer.server, services as never)
-    const loreLearn = mockServer.getActionHandler("lore-fact", "create")
+  ])(
+    "rejects malformed session provenance at the schema boundary: %s",
+    async (_name, partial) => {
+      const mockServer = createMockServer()
+      const services = makeServices()
+      registerKnowledgeTools(mockServer.server, services as never)
+      registerQueryTools(mockServer.server, services as never)
+      const loreLearn = mockServer.getActionHandler("lore-fact", "create")
 
-    const result = await loreLearn({
-      subject: "AuthService",
-      predicate: "uses",
-      object: "JWT",
-      ...partial,
-    } as never)
+      const result = await loreLearn({
+        subject: "AuthService",
+        predicate: "uses",
+        object: "JWT",
+        ...partial,
+      } as never)
 
-    const payload = result as { content: Array<{ text: string }>; isError?: boolean }
-    expect(payload.isError).toBe(true)
-    expect(payload.content[0].text).toContain("Error: lore-fact: sourceMemoryId:")
-    expect(payload.content[0].text).toContain("provenance-missing")
-    expect(services.facts.createWithDedup).not.toHaveBeenCalled()
-  })
+      const payload = result as { content: Array<{ text: string }>; isError?: boolean }
+      expect(payload.isError).toBe(true)
+      expect(payload.content[0].text).toContain("Error: lore-fact: sourceMemoryId:")
+      expect(payload.content[0].text).toContain("provenance-missing")
+      expect(services.facts.createWithDedup).not.toHaveBeenCalled()
+    }
+  )
 
   it("creates the fact when sourceMemoryId is passed explicitly", async () => {
     const mockServer = createMockServer()
@@ -1969,7 +1972,9 @@ describe("lore-learn sourceMemoryId discipline", () => {
         findByName: vi.fn().mockResolvedValue({ id: "proj-server", name: "server" }),
       },
       memories: {
-        getPropertiesById: vi.fn().mockResolvedValue(makeSourceMemory("mem-ios", ["proj-ios"])),
+        getPropertiesById: vi
+          .fn()
+          .mockResolvedValue(makeSourceMemory("mem-ios", ["proj-ios"])),
       },
     })
     registerKnowledgeTools(mockServer.server, services as never)

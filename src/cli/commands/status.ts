@@ -11,10 +11,7 @@ import {
   loadVaultTopologyStatus,
 } from "../../core/topology-status.js"
 import { formatTaskSummary, taskStats, todayUtc } from "../../core/task.js"
-import {
-  formatWakeUpCoverageReport,
-  loadWakeUpData,
-} from "../../core/wakeup.js"
+import { formatWakeUpCoverageReport, loadWakeUpData } from "../../core/wakeup.js"
 import type { Memory } from "../../types.js"
 import {
   formatExpiringScopedSummary,
@@ -32,6 +29,7 @@ import {
   formatBackgroundFailureStatus,
   loadBackgroundFailureStatus,
 } from "../../hooks/background-failure-status.js"
+import { defaultProfileSelector } from "../../profile/index.js"
 import { notionPageUrl, terminalLink } from "../output.js"
 
 /**
@@ -57,10 +55,7 @@ export const statusCommand = new Command("status")
       "when upstreamVaults or promotionTargets are configured; see " +
       "docs/topology.md for the full output contract."
   )
-  .option(
-    "--project <name>",
-    "Scope project-dependent status sections to a project"
-  )
+  .option("--project <name>", "Scope project-dependent status sections to a project")
   .action(async (opts: { project?: string }) => {
     try {
       // `lore status` is the canonical operator-facing surface for drift
@@ -102,6 +97,10 @@ export const statusCommand = new Command("status")
       console.log("Lore Vault Status")
       console.log("─".repeat(40))
       console.log(`  Vault page: ${services.context.vault.pageId}`)
+      const profileLabel = services.profile
+        ? `${services.profile.name}@${services.profile.version} (${services.profile.source})`
+        : `${defaultProfileSelector()} (built-in)`
+      console.log(`  Profile: ${profileLabel}`)
       const projectLabel = project
         ? `${terminalLink(project.name, notionPageUrl(project.id))} (${project.path || "root"})`
         : "none"
@@ -167,23 +166,24 @@ export const statusCommand = new Command("status")
       // parallel dispatch of the top-level probes; it does not
       // parallelize the iterator inside `confidenceStats`. The
       // method's docstring documents the cost gap.
-      const [tasks, confidence, proposedInbox, expiringScoped, wakeUp] = await Promise.all([
-        taskStats(services.tasks, {
-          projectId: project?.id,
-          today: todayUtc(),
-        }),
-        services.memories.confidenceStats({ projectId: project?.id }),
-        loadProposedInboxStatus(services, { projectId: project?.id }),
-        // Surfaces expired/expiring/out-of-context rows for cleanup.
-        // Same fan-out posture as the other probes; wall-clock at the
-        // orchestration level stays `max(...)`.
-        loadExpiringScopedStatus(services, { projectId: project?.id }),
-        loadWakeUpData(services, {
-          projectId: project?.id,
-          includeMemoryContent: false,
-          includeCoverage: true,
-        }),
-      ])
+      const [tasks, confidence, proposedInbox, expiringScoped, wakeUp] =
+        await Promise.all([
+          taskStats(services.tasks, {
+            projectId: project?.id,
+            today: todayUtc(),
+          }),
+          services.memories.confidenceStats({ projectId: project?.id }),
+          loadProposedInboxStatus(services, { projectId: project?.id }),
+          // Surfaces expired/expiring/out-of-context rows for cleanup.
+          // Same fan-out posture as the other probes; wall-clock at the
+          // orchestration level stays `max(...)`.
+          loadExpiringScopedStatus(services, { projectId: project?.id }),
+          loadWakeUpData(services, {
+            projectId: project?.id,
+            includeMemoryContent: false,
+            includeCoverage: true,
+          }),
+        ])
       for (const line of formatTaskSummary(tasks)) console.log(line)
       for (const line of formatConfidenceSummary(confidence)) console.log(line)
       for (const line of formatProposedInboxStatus(proposedInbox)) console.log(line)

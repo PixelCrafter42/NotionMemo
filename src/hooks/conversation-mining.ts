@@ -47,6 +47,7 @@ import {
   type BackgroundAgentConfig,
 } from "./config.js"
 import { buildBackgroundSavePrompt } from "./prompts.js"
+import type { ResolvedPromptRegistry } from "../profile/index.js"
 
 /**
  * Default wall-clock cap for one mining child. Per-session mining of
@@ -148,6 +149,10 @@ export interface RunConversationMiningOptions {
    */
   extractLearnings?: boolean
   proposeLearnings?: boolean
+  profilePrompts?: Pick<
+    ResolvedPromptRegistry,
+    "autosaveExtractionFilter" | "autosaveToolGuidance" | "atomicLearningExtraction"
+  >
   /**
    * Path an MCP-server-side write-budget Proxy writes its
    * cap-exceeded signal to. After the child exits, this helper reads
@@ -237,7 +242,7 @@ function openStderrSink(path: string): number | null {
     process.stderr.write(
       `[lore] conversation-mining: failed to open stderrSinkPath ` +
         `"${path}" (${(err as Error).message ?? "unknown error"}); ` +
-        `falling back to discard.\n`,
+        `falling back to discard.\n`
     )
     return null
   }
@@ -260,7 +265,7 @@ function openStderrSink(path: string): number | null {
  */
 export function runConversationMining(
   transcript: string,
-  options: RunConversationMiningOptions,
+  options: RunConversationMiningOptions
 ): Promise<MiningResult> {
   const allowedTools = options.allowedTools ?? DEFAULT_SAVE_ALLOWLIST
   const agentConfig: BackgroundAgentConfig = options.agent ?? {
@@ -278,14 +283,14 @@ export function runConversationMining(
       `[lore] conversation-mining: background command ` +
         `"${agentConfig.command}" not found on PATH. ` +
         `Install the binary or override hooks.backgroundAgent.command ` +
-        `in .lore.yaml (or set LORE_BACKGROUND_COMMAND).\n`,
+        `in .lore.yaml (or set LORE_BACKGROUND_COMMAND).\n`
     )
     return Promise.reject(
       new Error(
         `runConversationMining: background-agent binary ` +
           `"${agentConfig.command}" not found on PATH or in known ` +
-          `install locations.`,
-      ),
+          `install locations.`
+      )
     )
   }
 
@@ -299,7 +304,8 @@ export function runConversationMining(
       extractLearnings: options.extractLearnings ?? true,
       proposeLearnings: options.proposeLearnings ?? false,
       authorName: options.authorName,
-    },
+      profilePrompts: options.profilePrompts,
+    }
   )
 
   const args = renderAgentArgs(agentConfig.args, allowedTools)
@@ -455,9 +461,7 @@ export function runConversationMining(
       child.stdin.end()
     } else {
       settleReject(
-        new Error(
-          "runConversationMining: spawned child returned no stdin stream",
-        ),
+        new Error("runConversationMining: spawned child returned no stdin stream")
       )
     }
   })

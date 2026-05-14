@@ -13,10 +13,7 @@ import { mergeHookDefaults, type BackgroundAgentConfig } from "../../hooks/confi
 import { redactDebugMessage } from "../../debug-redact.js"
 import type { MemoryTagPlan } from "../../core/tag-migration.js"
 import { classifyTags, planMemoryMigration } from "../../core/tag-migration.js"
-import {
-  BODY_SIZE_CAP_BYTES,
-  type EncodedMemoryRow,
-} from "../../core/memory-encoding.js"
+import { BODY_SIZE_CAP_BYTES, type EncodedMemoryRow } from "../../core/memory-encoding.js"
 import type {
   TopicAliasMergePlan,
   TopicAliasMergeResult,
@@ -442,7 +439,8 @@ export const migrateCommand = new Command("migrate")
           // missing live; abort with a directive error rather than letting
           // a later, non-dry-run --tags pass fail mid-loop against Notion.
           const memoriesDiff = diffs.find((d) => d.database === "memories")
-          const keywordsMissing = memoriesDiff?.missing.includes(MEMORY_PROPS.KEYWORDS) ?? false
+          const keywordsMissing =
+            memoriesDiff?.missing.includes(MEMORY_PROPS.KEYWORDS) ?? false
           if (keywordsMissing && opts.dryRun) {
             console.log(
               "\n--tags requires the `Keywords` property, which the live schema is missing. " +
@@ -833,12 +831,12 @@ async function migrateOutOfVocabTags(
       scanned++
       if (memory.tags.length === 0) continue
 
-      const classification = classifyTags(memory.tags)
+      const classification = classifyTags(memory.tags, services.profile.taxonomy.tags)
       for (const tag of classification.ambiguous) {
         ambiguousFreq.set(tag, (ambiguousFreq.get(tag) ?? 0) + 1)
       }
 
-      const plan = planMemoryMigration(memory)
+      const plan = planMemoryMigration(memory, services.profile.taxonomy.tags)
       if (plan) plans.push(plan)
     }
 
@@ -1283,9 +1281,7 @@ export async function runMemoryEncodingFix(
   const isBodyFixablePlanned = (r: EncodedMemoryRow): boolean =>
     r.contentNeedsFix && (!r.contentTooLargeToFix || r.anchoredPathPlanned)
   const fixableRows = planOnly
-    ? report.encoded.filter(
-        (r) => r.titleNeedsFix || isBodyFixablePlanned(r)
-      ).length
+    ? report.encoded.filter((r) => r.titleNeedsFix || isBodyFixablePlanned(r)).length
     : report.fixes.length
   const titlePlanned = planOnly
     ? report.encoded.filter((r) => r.titleNeedsFix).length
@@ -1357,8 +1353,7 @@ export async function runMemoryEncodingFix(
     // `oversizedSkipped` is what keeps plan output truthful — the
     // pre-review version conflated both into a single "skipped"
     // bucket and silently understated what apply mode would do.
-    const noun =
-      report.oversizedAnchoredPlanned.length === 1 ? "memory" : "memories"
+    const noun = report.oversizedAnchoredPlanned.length === 1 ? "memory" : "memories"
     const verbPhrase = planOnly
       ? "Will fix oversized body via anchored RunTool patterns on"
       : "Fixed oversized body via anchored RunTool patterns on"
@@ -1366,7 +1361,10 @@ export async function runMemoryEncodingFix(
       `\n${verbPhrase} ${report.oversizedAnchoredPlanned.length} ${noun} ` +
         `(body > ${formatBytes(BODY_SIZE_CAP_BYTES)}):`
     )
-    for (const row of report.oversizedAnchoredPlanned.slice(0, ENCODING_FIX_PREVIEW_LIMIT)) {
+    for (const row of report.oversizedAnchoredPlanned.slice(
+      0,
+      ENCODING_FIX_PREVIEW_LIMIT
+    )) {
       console.log(
         `  ${row.id} — "${row.decodedTitle}" (${formatBytes(row.contentBytes)})`
       )
@@ -2432,9 +2430,7 @@ export async function runBackfillFactObservedAt(
         // the redactor is forward-compat hardening that matches the
         // posture every other operator-visible error surface in this
         // codebase already adopts.
-        console.log(
-          `       - ${failure.factId}: ${redactDebugMessage(failure.message)}`
-        )
+        console.log(`       - ${failure.factId}: ${redactDebugMessage(failure.message)}`)
       }
       if (failures.length > PREVIEW) {
         console.log(`       ... and ${failures.length - PREVIEW} more`)
