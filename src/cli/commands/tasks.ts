@@ -10,6 +10,7 @@ import {
   DEFAULT_RECONCILE_MIN_SCORE,
   MAX_RECONCILE_LIMIT,
 } from "../../core/task-reconcile.js"
+import { validateTaskSubjectForCreate } from "../../core/task-subject-validation.js"
 import {
   resolveProjectScopeName,
   validateExplicitProjectScopeName,
@@ -437,6 +438,7 @@ export interface CreateCliOptions {
   tags: string[] | undefined
   keywords: string | undefined
   synopsis: string | undefined
+  allowPointerSubject?: boolean
 }
 
 export interface CreateCliResultData {
@@ -472,6 +474,7 @@ export function parseCreateCliOptions(
     tags?: string
     keywords?: string
     synopsis?: string
+    allowPointerSubject?: boolean
   },
   tagVocabulary: readonly string[] = TAG_VOCABULARY
 ): CliParseResult<CreateCliOptions> {
@@ -497,6 +500,17 @@ export function parseCreateCliOptions(
         "(PR number, person, external service); whitespace-only labels are rejected",
     }
   }
+  const subjectValidation = validateTaskSubjectForCreate({
+    subject,
+    description: raw.description,
+    synopsis: raw.synopsis,
+    dueDate: dueDate.value,
+    blockedBy: raw.blockedBy,
+    allowPointerSubject: raw.allowPointerSubject,
+  })
+  if (!subjectValidation.ok) {
+    return { ok: false, message: subjectValidation.message }
+  }
   return {
     ok: true,
     value: {
@@ -511,6 +525,7 @@ export function parseCreateCliOptions(
       tags: tags.value,
       keywords: raw.keywords,
       synopsis: raw.synopsis,
+      allowPointerSubject: raw.allowPointerSubject,
     },
   }
 }
@@ -535,6 +550,10 @@ export async function runTaskCreate(
   services: LoreServices,
   opts: CreateCliOptions
 ): Promise<CreateCliResult> {
+  const subjectValidation = validateTaskSubjectForCreate(opts)
+  if (!subjectValidation.ok) {
+    throw new Error(subjectValidation.message)
+  }
   const features = services.features ?? resolveFeatureFlags()
   let projectId: string | undefined
   let projectLabel: string
@@ -748,6 +767,10 @@ const createCommand = new Command("create")
   .option("--tags <list>", "Comma-separated tags from the closed vocabulary")
   .option("--keywords <text>", "Free-form keywords")
   .option("--synopsis <text>", "1–2 sentence synopsis of the task")
+  .option(
+    "--allow-pointer-subject",
+    "Bypass the pointer-only subject guard for false positives"
+  )
   .option("--json", "Emit the result as a JSON object instead of human text")
   .action(
     async (
@@ -763,6 +786,7 @@ const createCommand = new Command("create")
         tags?: string
         keywords?: string
         synopsis?: string
+        allowPointerSubject?: boolean
         json?: boolean
       }
     ) => {
