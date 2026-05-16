@@ -1129,6 +1129,6 @@ export class FactCreatePipeline {
     if (pages.length > 1) {
       logDedupDuplicateScopeMatchOnce(dedupKey)
     }
-    return await this.deps.pageToFact(pages[0]!)
+    return await this.deps.pageToFact(pages[0])
   }
 }
