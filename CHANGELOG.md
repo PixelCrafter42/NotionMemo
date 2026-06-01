@@ -11,6 +11,43 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-01
+
+### Added
+
+- Added OSS longitudinal eval harnesses with segmented and parallel execution,
+  sampled scenario pools, hidden-verifier validation, and cross-boundary
+  model-hard scenario suites for GitHub CLI and common Python ecosystems.
+  (#911, #913, #915, #917, #918)
+- Added a retrieval-quality eval harness for live-vault search ranking, with
+  target-rank, recall, and MRR reporting across product, RunTool AI, and REST
+  keyword lanes. (#938)
+- Added fact confidence auditing to memory debt workflows, so stale or
+  low-confidence facts can be detected alongside memory expiry and
+  summary-quality debt. (#941)
+- Added formation memory quality gates so longitudinal and autosave evaluation
+  can distinguish reusable knowledge from low-value recall rows. (#942)
+
+### Changed
+
+- Recall hygiene now excludes non-knowledge rows by default and retires the
+  agent-diary memory source, keeping recall focused on reusable knowledge
+  rather than session narration. (#932, #933)
+- RunTool search is now authoritative for search-backed recall paths. (#936)
+- Memory confidence machinery was removed from retrieval and storage paths in
+  favor of explicit audits and quality gates. (#937)
+- Longitudinal eval scoring now treats expected-context misses as diagnostics,
+  repairs measurement validity, and records GitHub CLI/model-hard campaign
+  checkpoints, including statistically significant seeded-memory lift evidence.
+  (#912, #914, #916, #917, #918)
+
+### Fixed
+
+- Autosave learning capture deduplicates paraphrases more aggressively, reducing
+  repeated memory rows for the same learning. (#939)
+- Digest saves and debt-scan results are deduplicated before writing or
+  reporting, preventing repeated summary and debt output. (#940)
+
 ## [0.16.0] - 2026-05-26
 
 ### Added
@@ -1115,7 +1152,8 @@ move atomically per the release-coordinator pattern (#13).
   `lore migrate --migrate-tracking-to-tasks` still works; on 0.6.0
   the prose updates to reflect the migration command's removal.
 
-[Unreleased]: https://github.com/makenotion/lore/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/makenotion/lore/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/makenotion/lore/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/makenotion/lore/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/makenotion/lore/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/makenotion/lore/compare/v0.14.0...v0.15.0
