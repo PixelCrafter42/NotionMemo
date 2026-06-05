@@ -69,6 +69,14 @@ Historical bumps and what they signalled:
 
 Latest historical note:
 
+- `0.18.0` (2026-06-05) ships the SkillRet evaluation release. New
+  agent-observable eval surfaces include the SkillRet retrieval and context-use
+  runners, the read-only SkillRet agent runner, committed free-eval artifacts,
+  GPT-5.5 read-only agent samples, and the deterministic 5x500 SkillRet
+  checkpoint plan. The release does not change the production Lore recall
+  contract; it improves measurement coverage for Notion-backed read-only agent
+  use. The package, lockfile, MCP handshake, CLI version, and Notion
+  `User-Agent` literals move together under the version-sync guard.
 - `0.15.1` (2026-05-20) ships the hook wake-up task-triage fix. Automatic
   hook wake-up skips task inventory and active-task-seeded related-memory
   retrieval, while query-ranked current-task memories still render when the
