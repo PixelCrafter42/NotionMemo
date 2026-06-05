@@ -261,6 +261,8 @@ export interface FormatMemoryListItemOptions {
    * outside this helper.
    */
   body?: string
+  /** Additional listing metadata rendered after the italic meta line. */
+  detailLines?: string[]
 }
 
 /**
@@ -394,6 +396,10 @@ export function formatMemoryListItem(
   const metaText = renderMetaLine(memory, options.meta)
   if (metaText !== null) {
     lines.push(`*${metaText}*`)
+  }
+
+  for (const detail of options.detailLines ?? []) {
+    if (detail.trim()) lines.push(detail)
   }
 
   let rendered = lines.join("\n")

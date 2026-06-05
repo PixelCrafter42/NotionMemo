@@ -9,7 +9,7 @@ import {
 import { redactDebugExtraInfo, redactDebugMessage } from "../debug-redact.js"
 import { normalizeNotionApiBaseUrl } from "../auth/oauth.js"
 
-const USER_AGENT = "lore/0.18.0"
+const USER_AGENT = "lore/0.18.1"
 
 export interface ClientAuthSnapshot {
   token: string

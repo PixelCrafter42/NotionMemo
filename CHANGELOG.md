@@ -11,6 +11,18 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-06-05
+
+### Added
+
+- Added process-local result handles to normal MCP memory recall/search output.
+  `lore-query action='recall'` and `action='search'` now show a result-set id
+  plus per-row `rs_*:mN` handles so agents can target selected rows with
+  `lore-memory action='expand'` instead of re-running broad body fetches.
+- `lore-memory action='expand'` now accepts those recall/search result handles
+  alongside dashed UUIDs and undashed Notion page IDs, while expanded bodies
+  surface the stable Notion page ID for citations and later follow-up.
+
 ## [0.18.0] - 2026-06-05
 
 ### Added
@@ -1173,7 +1185,8 @@ move atomically per the release-coordinator pattern (#13).
   `lore migrate --migrate-tracking-to-tasks` still works; on 0.6.0
   the prose updates to reflect the migration command's removal.
 
-[Unreleased]: https://github.com/makenotion/lore/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/makenotion/lore/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/makenotion/lore/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/makenotion/lore/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/makenotion/lore/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/makenotion/lore/compare/v0.15.1...v0.16.0

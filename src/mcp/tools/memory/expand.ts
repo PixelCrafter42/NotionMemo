@@ -2,25 +2,35 @@ import type { LoreServices } from "../../server.js"
 import { fireTouchOnRead, toolError } from "../../helpers.js"
 import { debugLogPartialFailures } from "../../../observability/partial-failure.js"
 import { settleAll } from "../../../core/settle.js"
+import { isMemoryResultHandle } from "../../../memory-result-handles.js"
 import type { Memory } from "../../../types.js"
 import type { ToolResult } from "./types.js"
+
+type ExpandTarget =
+  | { ok: true; input: string; id: string }
+  | { ok: false; input: string; message: string }
 
 export async function handleExpand(
   services: LoreServices,
   args: { ids: string[] }
 ): Promise<ToolResult> {
   try {
-    const unique: string[] = []
+    const targets: ExpandTarget[] = []
     const seen = new Set<string>()
-    for (const id of args.ids) {
-      if (!seen.has(id)) {
-        seen.add(id)
-        unique.push(id)
-      }
+    for (const input of args.ids) {
+      const target = resolveExpandTarget(services, input)
+      const dedupeKey = target.ok ? `id:${target.id}` : `unresolved:${target.input}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      targets.push(target)
     }
 
+    const idsToFetch = targets
+      .filter((target): target is Extract<ExpandTarget, { ok: true }> => target.ok)
+      .map((target) => target.id)
+
     const { fulfilled, failures } = await settleAll(
-      unique.map((id) => [id, services.memories.getById(id)] as const)
+      idsToFetch.map((id) => [id, services.memories.getById(id)] as const)
     )
     if (failures.length > 0) {
       debugLogPartialFailures(
@@ -34,7 +44,12 @@ export async function handleExpand(
     const errors = new Map<string, unknown>()
     for (const { key, error } of failures) errors.set(key, error)
 
-    const sections = unique.map((id) => {
+    const sections = targets.map((target) => {
+      if (!target.ok) {
+        return `### (unresolved: ${target.input})\n*${target.message}*`
+      }
+
+      const id = target.id
       const memory = bodies.get(id)
       if (memory) return formatExpandedMemory(memory)
       const error = errors.get(id)
@@ -43,9 +58,10 @@ export async function handleExpand(
       return `### (unresolved: ${id})\n*${message}*`
     })
 
+    const unresolvedCount = targets.length - fulfilled.length
     const header =
-      failures.length > 0
-        ? `Expanded ${fulfilled.length}/${unique.length} memories (${failures.length} unresolved):`
+      unresolvedCount > 0
+        ? `Expanded ${fulfilled.length}/${targets.length} memories (${unresolvedCount} unresolved):`
         : `Expanded ${fulfilled.length} ${fulfilled.length === 1 ? "memory" : "memories"}:`
 
     const response: ToolResult = {
@@ -68,6 +84,27 @@ export async function handleExpand(
   }
 }
 
+function resolveExpandTarget(services: LoreServices, input: string): ExpandTarget {
+  if (!isMemoryResultHandle(input)) return { ok: true, input, id: input }
+
+  const store = services.memoryResultHandles
+  if (!store) {
+    return {
+      ok: false,
+      input,
+      message:
+        `Result handle ${input} is not available in this MCP process. ` +
+        "Run lore-query recall/search again and use a returned handle.",
+    }
+  }
+
+  const resolved = store.resolve(input)
+  if (!resolved.ok) {
+    return { ok: false, input, message: resolved.message }
+  }
+  return { ok: true, input, id: resolved.id }
+}
+
 /**
  * Render one hydrated memory for `lore-memory action='expand'` output.
  * Mirrors the meta-line shape used by `lore-query action='recall'` /
@@ -78,6 +115,7 @@ export async function handleExpand(
  */
 function formatExpandedMemory(m: Memory): string {
   const meta = [
+    `ID: ${m.id}`,
     m.source,
     m.kind !== "note" ? m.kind : null,
     m.status !== "informational" ? m.status : null,
@@ -86,5 +124,5 @@ function formatExpandedMemory(m: Memory): string {
     .filter(Boolean)
     .join(" | ")
   const body = m.content ? `\n\n${m.content}` : ""
-  return `### ${m.title}\n*${meta}*${body}`
+  return `### ${m.title}\n*${meta}*\nUse this ID for citations or follow-up expand calls: \`${m.id}\`${body}`
 }

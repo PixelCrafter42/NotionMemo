@@ -14,6 +14,7 @@ import {
 } from "../../core/memory.js"
 import { extractEntityCandidates } from "../../core/near-duplicate.js"
 import { decodeTextEntities } from "../../notion/html-entities.js"
+import { MemoryResultHandleStore } from "../../memory-result-handles.js"
 import type { Memory, Topic } from "../../types.js"
 
 /**
@@ -1995,6 +1996,42 @@ describe("lore-recall content-off default", () => {
     expect(text).toContain("includeContent: true")
   })
 
+  it("returns result handles that resolve to listed memory ids", async () => {
+    const mockServer = createMockServer()
+    const memoryResultHandles = new MemoryResultHandleStore({ now: () => 1000 })
+    const memoriesList = vi.fn().mockResolvedValue({
+      items: [
+        makeMemory("mem-1", { title: "Row A", content: "" }),
+        makeMemory("mem-2", { title: "Row B", content: "" }),
+      ],
+    })
+
+    const services = {
+      topics: { findByName: vi.fn() },
+      memories: { list: memoriesList },
+      projects: { findByName: vi.fn() },
+      context: { project: null },
+      memoryResultHandles,
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    registerQueryTools(mockServer.server, services as never)
+    const recall = mockServer.getActionHandler("lore-query", "recall")
+
+    const result = await recall({} as never)
+    const text = (result as { content: Array<{ text: string }> }).content[0].text
+    const handle = text.match(/rs_[0-9a-f]{16}:m1/u)?.[0]
+
+    expect(handle).toBeDefined()
+    expect(text).toContain("Result set: `rs_")
+    expect(text).toContain(`Handle: \`${handle}\``)
+    expect(text).toContain(`lore-memory action='expand' ids=["${handle}"]`)
+    expect(memoryResultHandles.resolve(handle as string)).toEqual({
+      ok: true,
+      id: "mem-1",
+    })
+  })
+
   it("forwards includeContent: true through to the service when opted in", async () => {
     const mockServer = createMockServer()
     const memoriesList = vi.fn().mockResolvedValue({
@@ -2185,6 +2222,38 @@ describe("lore-search content-off default", () => {
     expect(text).not.toContain("(content not loaded)")
     expect(text).toContain("### A hit")
     expect(text).toContain("includeContent: true")
+  })
+
+  it("returns result handles for targeted expansion", async () => {
+    const mockServer = createMockServer()
+    const memoryResultHandles = new MemoryResultHandleStore({ now: () => 1000 })
+    const memoriesSearch = vi
+      .fn()
+      .mockResolvedValue([makeMemory("mem-1", { title: "A hit", content: "" })])
+
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { findByName: vi.fn() },
+      memories: { search: memoriesSearch, list: vi.fn() },
+      context: { project: null },
+      memoryResultHandles,
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    registerQueryTools(mockServer.server, services as never)
+    const search = mockServer.getActionHandler("lore-query", "search")
+
+    const result = await search({ query: "anything" } as never)
+    const text = (result as { content: Array<{ text: string }> }).content[0].text
+    const handle = text.match(/rs_[0-9a-f]{16}:m1/u)?.[0]
+
+    expect(handle).toBeDefined()
+    expect(text).toContain("Result set: `rs_")
+    expect(text).toContain(`Handle: \`${handle}\``)
+    expect(memoryResultHandles.resolve(handle as string)).toEqual({
+      ok: true,
+      id: "mem-1",
+    })
   })
 
   it("forwards includeContent: true and renders bodies when opted in", async () => {
@@ -2404,6 +2473,82 @@ describe("lore-expand", () => {
     expect(text).toContain(`Body for ${ID_C}`)
     expect(text).toContain("Expanded 3 memories")
     expect(getById).toHaveBeenCalledTimes(3)
+  })
+
+  it("accepts result handles returned by recall/search", async () => {
+    const mockServer = createMockServer()
+    const memoryResultHandles = new MemoryResultHandleStore({ now: () => 1000 })
+    const resultSet = memoryResultHandles.register([ID_A, ID_B])
+    const getById = vi.fn(async (id: string) =>
+      makeMemory(id, {
+        title: `Title ${id}`,
+        content: `Body ${id}`,
+      })
+    )
+
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { findByName: vi.fn() },
+      memories: { getById },
+      context: { project: null },
+      sessionMemories: { record: vi.fn(), get: vi.fn() },
+      identity: { resolveAuthor: vi.fn(async () => null), clearCache: vi.fn() },
+      memoryResultHandles,
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    registerQueryTools(mockServer.server, services as never)
+    const expand = mockServer.getActionHandler("lore-memory", "expand")
+
+    const result = await expand({ ids: [resultSet.handles[0], ID_B] } as never)
+    const text = (result as { content: Array<{ text: string }> }).content[0].text
+
+    expect((result as { isError?: boolean }).isError).not.toBe(true)
+    expect(getById).toHaveBeenCalledWith(ID_A)
+    expect(getById).toHaveBeenCalledWith(ID_B)
+    expect(text).toContain(`*ID: ${ID_A} | manual | 2026-04-20*`)
+    expect(text).toContain(
+      `Use this ID for citations or follow-up expand calls: \`${ID_A}\``
+    )
+    expect(text).toContain(`Body ${ID_A}`)
+    expect(text).toContain("Expanded 2 memories")
+  })
+
+  it("renders stale result handles as unresolved without blocking valid ids", async () => {
+    const mockServer = createMockServer()
+    const memoryResultHandles = new MemoryResultHandleStore({ now: () => 1000 })
+    const getById = vi.fn(async (id: string) =>
+      makeMemory(id, {
+        title: `Title ${id}`,
+        content: `Body ${id}`,
+      })
+    )
+
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { findByName: vi.fn() },
+      memories: { getById },
+      context: { project: null },
+      sessionMemories: { record: vi.fn(), get: vi.fn() },
+      identity: { resolveAuthor: vi.fn(async () => null), clearCache: vi.fn() },
+      memoryResultHandles,
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    registerQueryTools(mockServer.server, services as never)
+    const expand = mockServer.getActionHandler("lore-memory", "expand")
+
+    const staleHandle = "rs_0123456789abcdef:m1"
+    const result = await expand({ ids: [staleHandle, ID_A] } as never)
+    const text = (result as { content: Array<{ text: string }> }).content[0].text
+
+    expect((result as { isError?: boolean }).isError).not.toBe(true)
+    expect(getById).toHaveBeenCalledTimes(1)
+    expect(getById).toHaveBeenCalledWith(ID_A)
+    expect(text).toContain("Expanded 1/2 memories (1 unresolved)")
+    expect(text).toContain(`### (unresolved: ${staleHandle})`)
+    expect(text).toContain("Run lore-query recall/search again")
+    expect(text).toContain(`Body ${ID_A}`)
   })
 
   it("enforces the 20-ID cap at the dispatcher's discriminated union", async () => {
