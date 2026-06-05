@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { richTextPropertySchema } from "../../../core/rich-text-schema.js"
 import { DEFAULT_MEMORY_SYNOPSIS_MAX } from "../../../types.js"
+import { isMemoryResultHandle } from "../../../memory-result-handles.js"
 import { clearableYmdDateSchema, ymdDateSchema } from "../date-schema.js"
 import { notionPageIdSchema } from "../../../notion/page-id-schema.js"
 import { scopeInputSchema } from "../scope-schema.js"
@@ -15,6 +16,22 @@ import {
   SUGGEST_KIND_VALUES,
   TOPIC_KEY_REGEX,
 } from "./types.js"
+
+const memoryExpandIdSchema = z
+  .string()
+  .superRefine((value, ctx) => {
+    if (notionPageIdSchema.safeParse(value).success || isMemoryResultHandle(value)) {
+      return
+    }
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "must be a Notion page id or memory result handle",
+    })
+  })
+  .transform((value) => {
+    const pageId = notionPageIdSchema.safeParse(value)
+    return pageId.success ? pageId.data : value
+  })
 
 export function createMemoryDispatchSchema(
   tagsSchema: ReturnType<typeof createTagsSchema>,
@@ -100,7 +117,7 @@ export function createMemoryDispatchSchema(
     }),
     z.object({
       action: z.literal("expand"),
-      ids: z.array(notionPageIdSchema).min(1).max(EXPAND_MAX_IDS),
+      ids: z.array(memoryExpandIdSchema).min(1).max(EXPAND_MAX_IDS),
     }),
     z.object({
       action: z.literal("suggest-topic-key"),

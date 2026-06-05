@@ -2,6 +2,7 @@ import { fireTouchOnRead, paginationFooter, toolError } from "../../helpers.js"
 import { resolveReadProjectScope } from "../../resolve.js"
 import { defaultMemoryMetaBuilder, formatMemoryListItem } from "../../render.js"
 import type { LoreServices } from "../../server.js"
+import type { MemoryResultSetRegistration } from "../../../memory-result-handles.js"
 import type {
   Memory,
   MemoryKind,
@@ -79,26 +80,27 @@ export async function handleRecall(
     }
 
     const includeSynopsis = args.includeSynopsis !== false
+    const resultSet = registerMemoryResultSet(services, memories)
 
     const text = memories
-      .map((m) =>
+      .map((m, index) =>
         formatMemoryListItem(m, {
           meta: defaultMemoryMetaBuilder,
           body: withContent ? m.content : undefined,
           includeSynopsis,
+          detailLines: memoryHandleDetailLines(resultSet, index),
         })
       )
       .join("\n\n---\n\n")
 
-    const bodiesFooter = withContent
-      ? ""
-      : `\n\n_Bodies omitted — re-call with \`includeContent: true\` to fetch them._`
+    const resultSetHeader = formatResultSetHeader(resultSet)
+    const bodiesFooter = formatBodiesFooter(withContent, resultSet)
 
     const response: ToolResult = {
       content: [
         {
           type: "text",
-          text: `${memories.length} recent memories:\n\n${text}${bodiesFooter}${paginationFooter(nextCursor, { truncated: capped })}`,
+          text: `${memories.length} recent memories:\n\n${resultSetHeader}${text}${bodiesFooter}${paginationFooter(nextCursor, { truncated: capped })}`,
         },
       ],
       costOutputs: { memoriesReturned: memories.length },
@@ -217,20 +219,21 @@ export async function handleSearch(
     }
 
     const includeSynopsis = args.includeSynopsis !== false
+    const resultSet = registerMemoryResultSet(services, results)
 
     const text = results
-      .map((m) =>
+      .map((m, index) =>
         formatMemoryListItem(m, {
           meta: defaultMemoryMetaBuilder,
           body: withContent ? m.content : undefined,
           includeSynopsis,
+          detailLines: memoryHandleDetailLines(resultSet, index),
         })
       )
       .join("\n\n---\n\n")
 
-    const bodiesFooter = withContent
-      ? ""
-      : `\n\n_Bodies omitted — re-call with \`includeContent: true\` to fetch them._`
+    const resultSetHeader = formatResultSetHeader(resultSet)
+    const bodiesFooter = formatBodiesFooter(withContent, resultSet)
 
     const explainFooter = wantExplain ? formatScoreTrace(explainSlice) : ""
 
@@ -238,7 +241,7 @@ export async function handleSearch(
       content: [
         {
           type: "text",
-          text: `Found ${results.length} memories for "${args.query}":\n\n${text}${bodiesFooter}${explainFooter}${warn}${cappedFooter}`,
+          text: `Found ${results.length} memories for "${args.query}":\n\n${resultSetHeader}${text}${bodiesFooter}${explainFooter}${warn}${cappedFooter}`,
         },
       ],
       costOutputs: { memoriesReturned: results.length },
@@ -254,6 +257,47 @@ export async function handleSearch(
   } catch (err) {
     return toolError(err)
   }
+}
+
+function registerMemoryResultSet(
+  services: LoreServices,
+  memories: readonly Memory[]
+): MemoryResultSetRegistration | null {
+  const store = services.memoryResultHandles
+  if (!store || memories.length === 0) return null
+  return store.register(memories.map((memory) => memory.id))
+}
+
+function formatResultSetHeader(resultSet: MemoryResultSetRegistration | null): string {
+  if (!resultSet) return ""
+  return `Result set: \`${resultSet.resultSetId}\`\n\n`
+}
+
+function memoryHandleDetailLines(
+  resultSet: MemoryResultSetRegistration | null,
+  index: number
+): string[] | undefined {
+  const handle = resultSet?.handles[index]
+  if (!handle) return undefined
+  return [`Handle: \`${handle}\``]
+}
+
+function formatBodiesFooter(
+  withContent: boolean,
+  resultSet: MemoryResultSetRegistration | null
+): string {
+  if (withContent) return ""
+
+  const firstHandle = resultSet?.handles[0]
+  if (!firstHandle) {
+    return `\n\n_Bodies omitted — re-call with \`includeContent: true\` to fetch them._`
+  }
+
+  return (
+    "\n\n_Bodies omitted — expand selected rows with " +
+    `\`lore-memory action='expand' ids=["${firstHandle}"]\`, ` +
+    "or re-call with `includeContent: true` when you need every body._"
+  )
 }
 
 /**

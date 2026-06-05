@@ -633,6 +633,18 @@ describe("formatMemoryListItem — heading level + meta variants", () => {
     )
   })
 
+  it("renders detail lines after the meta line", () => {
+    const out = formatMemoryListItem(synopsisMemory, {
+      detailLines: ["Handle: `rs_0123456789abcdef:m1`"],
+    })
+    expect(out).toBe(
+      "### OAuth handshake notes\n" +
+        "One-liner.\n" +
+        "*manual | 2026-04-20*\n" +
+        "Handle: `rs_0123456789abcdef:m1`"
+    )
+  })
+
   it("omits the meta line entirely when the builder returns null", () => {
     const out = formatMemoryListItem(synopsisMemory, { meta: () => null })
     // Heading + synopsis only, no italic meta line.

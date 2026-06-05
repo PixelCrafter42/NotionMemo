@@ -59,6 +59,7 @@ import {
   touchDriftMarker,
 } from "./hooks/drift-marker.js"
 import { SessionMemoryTracker } from "./session-memory-tracker.js"
+import { MemoryResultHandleStore } from "./memory-result-handles.js"
 import { resolveProfileFromConfigAtRoot, type ResolvedProfile } from "./profile/index.js"
 import { resolveFeatureFlags, type LoreFeatureFlags } from "./feature-flags.js"
 import { resolveMemorySynopsisMaxChars } from "./policy/memory-synopsis.js"
@@ -467,6 +468,12 @@ export interface LoreServices {
    */
   sessionMemories: SessionMemoryTracker
   /**
+   * Process-local bridge from title-tier recall/search rows to targeted
+   * expand calls. Handles are scoped to the current MCP process and resolve
+   * only to memory ids; durable references still use Notion page ids.
+   */
+  memoryResultHandles: MemoryResultHandleStore
+  /**
    * Lazy engineer identity resolver for Memory `Author` attribution
    * (DEFERRED-ATTRIBUTION). Write paths call it only when the caller
    * omitted an explicit author. `LORE_USER_NAME` resolves synchronously;
@@ -754,6 +761,7 @@ export async function initServicesFromConfig(
     config,
     configRoot,
     sessionMemories: new SessionMemoryTracker(),
+    memoryResultHandles: new MemoryResultHandleStore(),
     identity,
     authSource: auth.source,
     wakeupCache: new WakeUpCache(),
@@ -928,4 +936,5 @@ export function clearServiceCaches(services: LoreServices): void {
   services.decisions.clearCache()
   services.entities.clearNameCache()
   services.identity.clearCache()
+  services.memoryResultHandles.clear()
 }

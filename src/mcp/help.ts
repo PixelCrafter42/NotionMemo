@@ -112,18 +112,16 @@ export const HELP_RECIPES = [
   {
     tool: "lore-memory",
     action: "expand",
-    summary: "Fetch full markdown bodies for a batch of memory IDs.",
+    summary: "Fetch full markdown bodies for a batch of memory IDs or result handles.",
     whenToUse:
-      "Use this after lore-query action='recall', lore-query action='search', or lore-context action='wake-up' returns title-tier rows and you need the complete body for selected results.",
+      "Use this after lore-query action='recall' or lore-query action='search' returns title-tier rows and you need the complete body for selected results. Prefer the returned rs_* handles immediately after a result list; use durable Notion page IDs for later citations or wake-up rows.",
     example: {
       action: "expand",
-      ids: [
-        "11111111-1111-1111-1111-111111111111",
-        "22222222-2222-2222-2222-222222222222",
-      ],
+      ids: ["rs_0123456789abcdef:m1", "11111111-1111-1111-1111-111111111111"],
     },
     cautions: [
       "Expand only the rows you need; each body fetch costs an extra Notion read.",
+      "Result handles are process-local and short-lived; expanded output includes stable Notion page IDs.",
     ],
   },
   {

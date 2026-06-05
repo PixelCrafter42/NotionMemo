@@ -69,6 +69,14 @@ Historical bumps and what they signalled:
 
 Latest historical note:
 
+- `0.18.1` (2026-06-05) ships production MCP result handles for memory
+  recall/search. Title-tier `lore-query action='recall'` and
+  `action='search'` rows now include scoped `rs_*:mN` handles, and
+  `lore-memory action='expand'` accepts those handles alongside durable Notion
+  page ids. Expanded memory bodies surface the stable page id for citations.
+  This is an agent-facing MCP output/schema change; the package, lockfile, MCP
+  handshake, CLI version, and Notion `User-Agent` literals move together under
+  the version-sync guard.
 - `0.18.0` (2026-06-05) ships the SkillRet evaluation release. New
   agent-observable eval surfaces include the SkillRet retrieval and context-use
   runners, the read-only SkillRet agent runner, committed free-eval artifacts,

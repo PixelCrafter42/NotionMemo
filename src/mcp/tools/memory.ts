@@ -52,7 +52,7 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
         "- `action: 'save'` — create a memory; duplicate-probes in parallel. With `topicKey`, upserts by key + project-set and appends a revision. With `subject` + `replace: true`, writes current state under `state/<slug>`: one wake-up row, revision history intact.\n" +
         "- `action: 'update'` — mutate an existing memory's title, body, tags, kind, status, or relations. Any field omitted is left untouched. Rejects with `MemoryReadOnlyError` on read-only pinned blocks; use `lore-pinned action='update'` with `force: true` to override.\n" +
         "- `action: 'archive'` — soft-delete a memory by ID (Notion archive flag).\n" +
-        "- `action: 'expand'` — batch-fetch full markdown bodies for up to 20 IDs; companion to title-tier recall/search results.\n" +
+        "- `action: 'expand'` — batch-fetch full markdown bodies for up to 20 IDs or recall/search result handles.\n" +
         "- `action: 'history'` — read the full revision-chain body for a subject state memory.\n" +
         "- `action: 'suggest-topic-key'` — pure heuristic over (title, kind) → kebab-case key. Pass the result to `action: 'save'` as `topicKey`. Note/task/state return null.\n" +
         "- `action: 'compare'` — record a verdict on a memory pair (`conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict`). Asymmetric verdicts require `affectedMemoryId`. Idempotent on `(pair, verdict, affected)`.\n" +
@@ -108,7 +108,7 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
           .array(z.string())
           .optional()
           .describe(
-            `(action='expand') Memory IDs (1-${EXPAND_MAX_IDS}). Accepts dashed UUIDs as returned by recall/search/wake-up, or undashed 32-character hex ids from Notion page URLs.`
+            `(action='expand') Memory IDs or recall/search result handles (1-${EXPAND_MAX_IDS}). Accepts UUIDs, Notion URL hex ids, or rs_* handles.`
           ),
         // shared (save | update)
         projectName: z
