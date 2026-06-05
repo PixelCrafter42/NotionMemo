@@ -11,6 +11,27 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-05
+
+### Added
+
+- Added SkillRet retrieval and context-use eval runners, including the public
+  SkillRet corpus adapter, ranking metrics, and context-use support-set
+  scoring. (#944)
+- Added free eval result artifacts for the SkillRet keyword baseline, SkillRet
+  Notion AI directional lane, skill-use smoke suite, and Mail
+  retrieval-quality checks. (#945)
+- Added a read-only SkillRet agent eval runner that exercises Lore as an
+  instructed agent tool instead of raw search substrate recall. (#946)
+- Added SkillRet read-only agent result artifacts for the existing seeded
+  SkillRet vault, including the GPT-5.5 sample and deterministic 5x500
+  checkpoint plan. (#947, #948, #949)
+
+### Changed
+
+- SkillRet read-only agent benchmark runs now use a 10-minute timeout policy for
+  reported checkpoints, replacing the earlier 5-minute exploratory cap. (#949)
+
 ## [0.17.0] - 2026-06-01
 
 ### Added
@@ -1152,7 +1173,8 @@ move atomically per the release-coordinator pattern (#13).
   `lore migrate --migrate-tracking-to-tasks` still works; on 0.6.0
   the prose updates to reflect the migration command's removal.
 
-[Unreleased]: https://github.com/makenotion/lore/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/makenotion/lore/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/makenotion/lore/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/makenotion/lore/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/makenotion/lore/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/makenotion/lore/compare/v0.15.0...v0.15.1
