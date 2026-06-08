@@ -11,6 +11,37 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-06-08
+
+### Added
+
+- Added planned semantic search for `lore-query action='search'`, including
+  the `strategy: "planned" | "direct"` option, sanitized query variants,
+  query-plan metadata in tool output, and capability-oriented candidate context
+  for SkillRet agent/eval workflows. (#952)
+- Published the sanitized 500-query SkillRet read-only agent checkpoint for
+  planned search chunk 001, with corrected timeout-rerun provenance and report
+  synthesis. (#952)
+
+### Changed
+
+- Query planning now stays enabled by default and is configurable only through
+  `.lore.yaml` `features.queryPlanning`; the environment rollback path was
+  removed from feature-flag taxonomy and documentation. (#953)
+- Confidence no longer affects retrieval ranking. Confidence and trust remain
+  visible for display, auditing, and fact maintenance, while confidence audit
+  and help text now describe trust-score/display impact rather than ranking
+  impact. (#953)
+- Fresh vault schemas no longer create legacy Memories `Confidence` /
+  `Confidence Score` columns, while existing vaults retain compatibility for
+  reads and migrations. (#953)
+
+### Fixed
+
+- Guarded the autosave-learning-source backfill so fresh schemas without the
+  retired Memories `Confidence` column return zero candidates before issuing
+  legacy-property queries. (#953)
+
 ## [0.18.1] - 2026-06-05
 
 ### Added

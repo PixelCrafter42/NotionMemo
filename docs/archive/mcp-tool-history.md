@@ -69,6 +69,20 @@ Historical bumps and what they signalled:
 
 Latest historical note:
 
+- `0.19.0` (2026-06-08) ships planned semantic search for
+  `lore-query action='search'`. Agents can opt between `strategy: "planned"`
+  and `"direct"` and can observe sanitized query variants, query-plan metadata,
+  and capability-oriented candidate context, while the SkillRet eval corpus
+  gains a sanitized 500-query planned-search checkpoint.
+  Query planning remains enabled by default and is configurable only through
+  `.lore.yaml` `features.queryPlanning`; the environment rollback surface is
+  removed. Confidence no longer affects retrieval ranking, but remains visible
+  for display, auditing, and fact maintenance. Fresh vault schemas stop
+  creating legacy Memories `Confidence` / `Confidence Score` columns while
+  existing vaults retain read and migration compatibility. This release changes
+  agent-observable MCP output, retrieval configuration behavior, and setup /
+  migration behavior; the package, lockfile, MCP handshake, CLI version, and
+  Notion `User-Agent` literals move together under the version-sync guard.
 - `0.18.1` (2026-06-05) ships production MCP result handles for memory
   recall/search. Title-tier `lore-query action='recall'` and
   `action='search'` rows now include scoped `rs_*:mN` handles, and
