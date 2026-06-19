@@ -253,7 +253,9 @@ and `Next action`. Blocking setup failures exit non-zero and the final section
 prioritizes the first repair step, for example `lore auth --login`,
 `lore vault ensure-entities`, or `lore install`. Informational absences, such
 as no Cursor config on a project that has not installed Cursor, do not fail the
-doctor run.
+doctor run. MCP launchers emitted by `lore install` render as `current`; custom
+repo-managed launchers that clearly dispatch to `lore mcp` render as `custom`
+and do not fail the doctor run.
 
 ## Common memory operations
 

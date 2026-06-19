@@ -31,6 +31,7 @@ import {
 
 type ProblemKind = "config" | "auth" | "vault" | "host-config" | "hooks"
 type HookPresence = "present" | "stale" | "missing"
+type DoctorLauncherStatus = HookStatus | "custom"
 
 interface DoctorProblem {
   kind: ProblemKind
@@ -684,20 +685,23 @@ async function inspectJsonMcpFile(
 function classifyJsonMcpLauncher(
   loreEntry: Record<string, unknown>,
   launcher: JsonMcpLauncher
-): HookStatus {
+): DoctorLauncherStatus {
   const notionBaseUrlLiteral = extractJsonMcpNotionBaseUrlLiteral(loreEntry)
+  let status: HookStatus
   if (launcher.kind === "claude") {
-    return classifyClaudeMcpLauncher(loreEntry, {
+    status = classifyClaudeMcpLauncher(loreEntry, {
       ...launcherOptions(launcher.inspect),
       notionBaseUrlLiteral,
     })
+  } else {
+    status = classifyCursorMcpLauncher(loreEntry, {
+      ...launcherOptions(launcher.inspect),
+      notionBaseUrlLiteral,
+      useGlobalScope: launcher.useGlobalScope,
+      launchCwd: launcher.launchCwd,
+    })
   }
-  return classifyCursorMcpLauncher(loreEntry, {
-    ...launcherOptions(launcher.inspect),
-    notionBaseUrlLiteral,
-    useGlobalScope: launcher.useGlobalScope,
-    launchCwd: launcher.launchCwd,
-  })
+  return status === "stale" && isCustomMcpLauncher(loreEntry) ? "custom" : status
 }
 
 function launcherOptions(inspect: HostConfigInspection): {
@@ -791,7 +795,7 @@ async function inspectCodexConfig(
   const notionBaseUrlLiteral = canonicalNotionBaseUrlLiteral(
     extractShellEnvAssignment(block, "NOTION_BASE_URL")
   )
-  const launcherStatus = classifyCodexMcpLauncher(block, {
+  const launcherStatus = classifyDoctorCodexMcpLauncher(block, {
     ...launcherOptions(inspect),
     notionBaseUrlLiteral,
   })
@@ -809,6 +813,14 @@ async function inspectCodexConfig(
     }
   }
   return { lines, problems: [] }
+}
+
+function classifyDoctorCodexMcpLauncher(
+  block: string,
+  options: Parameters<typeof classifyCodexMcpLauncher>[1]
+): DoctorLauncherStatus {
+  const status = classifyCodexMcpLauncher(block, options)
+  return status === "stale" && isCustomTomlMcpLauncher(block) ? "custom" : status
 }
 
 function hostConfigProblem(label: string, detail: string): HostCheck {
@@ -867,6 +879,7 @@ async function inspectHooks(
   const lines: string[] = []
   const claudeMcpHasLore = await jsonMcpFileHasLoreEntry(join(roots.claude, ".mcp.json"))
   const claude = await inspectClaudeHooks(
+    join(roots.claude, ".claude", "settings.json"),
     resolveClaudeSettingsPath(roots.claude, homeDir),
     claudeMcpHasLore
   )
@@ -901,9 +914,54 @@ function claudeSettingsLabel(projectDir: string): string {
   return `~/.claude/projects/${encodeClaudeProjectPath(projectDir)}/settings.json`
 }
 
-async function inspectClaudeHooks(path: string, required: boolean): Promise<HostCheck> {
-  const parsed = await readJsonIfPresent(path)
-  if (parsed.kind === "missing") {
+interface ClaudeHookFileCheck {
+  kind: "missing" | "invalid" | "ok"
+  label: string
+  error?: string
+  wakeup?: HookPresence
+  autosave?: HookPresence
+  sessionEnd?: boolean
+  hasLoreOwnedHook?: boolean
+}
+
+async function inspectClaudeHooks(
+  projectPath: string,
+  homePath: string,
+  required: boolean
+): Promise<HostCheck> {
+  const checks = await Promise.all([
+    inspectClaudeHookFile(".claude/settings.json", projectPath),
+    inspectClaudeHookFile("Claude Code hooks", homePath),
+  ])
+  const [project, home] = checks
+
+  const complete = checks.find(
+    (check) =>
+      check.kind === "ok" &&
+      check.wakeup === "present" &&
+      check.autosave === "present" &&
+      !check.sessionEnd
+  )
+  const withLore = checks.find((check) => check.kind === "ok" && check.hasLoreOwnedHook)
+  const ok =
+    complete ??
+    withLore ??
+    (home.kind === "ok" ? home : project.kind === "ok" ? project : null)
+  const invalidChecks = checks.filter((check) => check.kind === "invalid")
+
+  if (!ok) {
+    if (invalidChecks.length > 0) {
+      return {
+        lines: invalidChecks.map(
+          (check) => `  ${check.label}: invalid JSON - ${check.error}`
+        ),
+        problems: invalidChecks.map((check) => ({
+          kind: "hooks",
+          message: `${check.label}: invalid JSON - ${check.error}`,
+          nextAction: "lore install",
+        })),
+      }
+    }
     return {
       lines: [
         required
@@ -922,21 +980,48 @@ async function inspectClaudeHooks(path: string, required: boolean): Promise<Host
         : [],
     }
   }
-  if (parsed.kind === "invalid") {
-    return hookProblem("Claude Code hooks", `invalid JSON - ${parsed.error}`)
-  }
-  const hooks = objectRecord(objectRecord(parsed.value)?.["hooks"])
-  const wakeup = classifyClaudeHookCommand(hooks?.["UserPromptSubmit"], "wakeup")
-  const autosave = classifyClaudeHookCommand(hooks?.["Stop"], "autosave")
-  const sessionEnd = hasHookCommand(hooks?.["SessionEnd"], "session-end")
-  const hasLoreOwnedHook = wakeup !== "missing" || autosave !== "missing" || sessionEnd
+
+  const wakeup = ok.wakeup ?? "missing"
+  const autosave = ok.autosave ?? "missing"
+  const sessionEnd = ok.sessionEnd ?? false
+  const hasLoreOwnedHook = ok.hasLoreOwnedHook ?? false
   const enforceHooks = required || hasLoreOwnedHook
   const lines = [
     `  Claude Code wakeup hook: ${wakeup}`,
     `  Claude Code autosave hook: ${autosave}`,
   ]
-  const problems: DoctorProblem[] = []
-  if (!required && hasLoreOwnedHook) {
+  const problems: DoctorProblem[] = invalidChecks.map((check) => {
+    lines.push(`  ${check.label}: invalid JSON - ${check.error}`)
+    return {
+      kind: "hooks",
+      message: `${check.label}: invalid JSON - ${check.error}`,
+      nextAction: "lore install",
+    }
+  })
+
+  for (const check of checks) {
+    if (check.kind !== "ok" || check === ok || !check.hasLoreOwnedHook) continue
+    lines.push(
+      `  ${check.label} wakeup hook: ${check.wakeup}`,
+      `  ${check.label} autosave hook: ${check.autosave}`
+    )
+    if (check.sessionEnd) {
+      lines.push(`  ${check.label} SessionEnd hook: legacy Lore entry present`)
+    }
+  }
+
+  const loreChecks = checks.filter(
+    (check): check is ClaudeHookFileCheck & { kind: "ok" } =>
+      check.kind === "ok" && Boolean(check.hasLoreOwnedHook)
+  )
+  const hasCompleteHooks = checks.some(
+    (check) =>
+      check.kind === "ok" &&
+      check.wakeup === "present" &&
+      check.autosave === "present" &&
+      !check.sessionEnd
+  )
+  if (!required && loreChecks.length > 0) {
     problems.push({
       kind: "hooks",
       message:
@@ -944,15 +1029,26 @@ async function inspectClaudeHooks(path: string, required: boolean): Promise<Host
       nextAction: "lore install",
     })
   }
-  if (enforceHooks && (wakeup !== "present" || autosave !== "present")) {
+  if (required && !hasCompleteHooks) {
     problems.push({
       kind: "hooks",
       message: "Claude Code hook config is missing or has a stale Lore hook.",
       nextAction: "lore install",
     })
   }
-  if (sessionEnd) {
-    lines.push("  Claude Code SessionEnd hook: legacy Lore entry present")
+  if (
+    enforceHooks &&
+    (!required || hasCompleteHooks) &&
+    loreChecks.some((check) => check.wakeup !== "present" || check.autosave !== "present")
+  ) {
+    problems.push({
+      kind: "hooks",
+      message: "Claude Code hook config is missing or has a stale Lore hook.",
+      nextAction: "lore install",
+    })
+  }
+  if (loreChecks.some((check) => check.sessionEnd)) {
+    if (sessionEnd) lines.push("  Claude Code SessionEnd hook: legacy Lore entry present")
     problems.push({
       kind: "hooks",
       message: "Claude Code SessionEnd still carries a legacy Lore hook.",
@@ -960,6 +1056,28 @@ async function inspectClaudeHooks(path: string, required: boolean): Promise<Host
     })
   }
   return { lines, problems }
+}
+
+async function inspectClaudeHookFile(
+  label: string,
+  path: string
+): Promise<ClaudeHookFileCheck> {
+  const parsed = await readJsonIfPresent(path)
+  if (parsed.kind === "missing") return { kind: "missing", label }
+  if (parsed.kind === "invalid") return { kind: "invalid", label, error: parsed.error }
+
+  const hooks = objectRecord(objectRecord(parsed.value)?.["hooks"])
+  const wakeup = classifyClaudeHookCommand(hooks?.["UserPromptSubmit"], "wakeup")
+  const autosave = classifyClaudeHookCommand(hooks?.["Stop"], "autosave")
+  const sessionEnd = hasHookCommand(hooks?.["SessionEnd"], "session-end")
+  return {
+    kind: "ok",
+    label,
+    wakeup,
+    autosave,
+    sessionEnd,
+    hasLoreOwnedHook: wakeup !== "missing" || autosave !== "missing" || sessionEnd,
+  }
 }
 
 async function inspectCodexHooks(
@@ -1059,29 +1177,20 @@ async function inspectCodexHooksFeature(
   return { enabled: false, hasLoreConfig, status: `not true (${value})` }
 }
 
-function hookProblem(label: string, detail: string): HostCheck {
-  return {
-    lines: [`  ${label}: ${detail}`],
-    problems: [
-      { kind: "hooks", message: `${label}: ${detail}`, nextAction: "lore install" },
-    ],
-  }
-}
-
 function hasHookCommand(
   value: unknown,
   eventName: "wakeup" | "autosave" | "session-end"
 ): boolean {
   if (!Array.isArray(value)) return false
   const legacyScript = `${eventName}.sh`
-  const commandPattern = new RegExp(`\\blore hooks ${eventName}\\b`)
   return value.some((entry) => {
     const hooks = objectRecord(entry)?.["hooks"]
     if (!Array.isArray(hooks)) return false
     return hooks.some((hook) => {
       const command = objectRecord(hook)?.["command"]
       return typeof command === "string"
-        ? commandPattern.test(command) || command.includes(`/${legacyScript}`)
+        ? shellDispatchesToLore(command, ["hooks", eventName]) ||
+            command.includes(`/${legacyScript}`)
         : false
     })
   })
@@ -1097,6 +1206,7 @@ function classifyClaudeHookCommand(
     `cd "$CLAUDE_PROJECT_DIR" && lore hooks ${eventName}`,
     `cd "$CLAUDE_PROJECT_DIR" && yarn run -T lore hooks ${eventName}`,
   ])
+  const anchoredPrefix = `cd "$CLAUDE_PROJECT_DIR" && `
   const loreBinDispatchPattern = new RegExp(
     `^(?:cd "\\$CLAUDE_PROJECT_DIR" && )?(?:yarn (?:run -T )?)?lore hooks ${eventName}$`
   )
@@ -1109,9 +1219,16 @@ function classifyClaudeHookCommand(
       const command = objectRecord(hook)?.["command"]
       if (typeof command !== "string") continue
       if (currentCommands.has(command)) return "present"
+      if (
+        command.startsWith(anchoredPrefix) &&
+        shellDispatchesToLore(command.slice(anchoredPrefix.length), ["hooks", eventName])
+      ) {
+        return "present"
+      }
       if (loreBinDispatchPattern.test(command) || command.endsWith(`/${legacyScript}`)) {
         stale = true
       }
+      if (shellDispatchesToLore(command, ["hooks", eventName])) stale = true
     }
   }
 
@@ -1285,6 +1402,155 @@ function canonicalNotionBaseUrlLiteral(value: string | null): string | undefined
   if (!value) return undefined
   if (value.startsWith("${") && value.endsWith("}")) return undefined
   return ntnEnvFromBaseUrl(value) ? value : undefined
+}
+
+function isCustomMcpLauncher(loreEntry: Record<string, unknown>): boolean {
+  const command = stringValue(loreEntry["command"])
+  const args = stringArray(loreEntry["args"])
+  return command !== null && args !== null && dispatchesToLore(command, args, ["mcp"])
+}
+
+function isCustomTomlMcpLauncher(block: string): boolean {
+  const command = extractTomlStringValue(block, "command")
+  const args = extractTomlStringArray(block, "args")
+  return command !== null && args !== null && dispatchesToLore(command, args, ["mcp"])
+}
+
+function dispatchesToLore(
+  command: string,
+  args: readonly string[],
+  loreArgs: readonly string[]
+): boolean {
+  if (argvDispatchesToLore(command, args, loreArgs)) return true
+  const shellCommand = extractShellCommand(command, args)
+  return shellCommand !== null && shellDispatchesToLore(shellCommand, loreArgs)
+}
+
+function argvDispatchesToLore(
+  command: string,
+  args: readonly string[],
+  loreArgs: readonly string[]
+): boolean {
+  if (isLoreToken(command)) return argsStartWith(args, loreArgs)
+  if (isYarnToken(command)) return yarnArgsDispatchToLore(args, loreArgs)
+  if (isNtxToken(command)) return argsStartWith(args, ["lore", ...loreArgs])
+  return false
+}
+
+function extractShellCommand(command: string, args: readonly string[]): string | null {
+  const executable = command.split("/").at(-1)
+  if (executable !== "bash" && executable !== "sh" && executable !== "zsh") {
+    return null
+  }
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === "-lc" || args[index] === "-c") return args[index + 1]!
+  }
+  return null
+}
+
+function shellDispatchesToLore(command: string, loreArgs: readonly string[]): boolean {
+  const loreTail = loreArgs.map(escapeRegExp).join("\\s+")
+  const quotedValue = `(?:"[^"]*"|'[^']*'|\\S+)`
+  const cdPrefix = `(?:cd\\s+${quotedValue}\\s+&&\\s+)?`
+  const envPrefix = `(?:[A-Z_][A-Z0-9_]*=${quotedValue}\\s+)*`
+  const executablePath = `(?:(?:\\.{1,2}|~)?/[^\\s;&|]+)`
+  const loreDispatch = `(?:lore|${executablePath}/lore)\\s+${loreTail}`
+  const yarnDispatch = `yarn\\s+(?:run\\s+-T\\s+)?lore\\s+${loreTail}`
+  const ntxDispatch = `(?:\\./ntx|ntx)\\s+lore\\s+${loreTail}`
+  const pattern = new RegExp(
+    `^\\s*${cdPrefix}${envPrefix}(?:exec\\s+)?(?:${loreDispatch}|${yarnDispatch}|${ntxDispatch})\\s*$`
+  )
+  return pattern.test(command)
+}
+
+function isLoreToken(value: string): boolean {
+  const token = stripSurroundingQuotes(value)
+  return token === "lore" || token.endsWith("/lore")
+}
+
+function isYarnToken(value: string): boolean {
+  const token = stripSurroundingQuotes(value)
+  return token === "yarn" || token.endsWith("/yarn")
+}
+
+function isNtxToken(value: string): boolean {
+  const token = stripSurroundingQuotes(value)
+  return token === "ntx" || token === "./ntx"
+}
+
+function yarnArgsDispatchToLore(
+  args: readonly string[],
+  loreArgs: readonly string[]
+): boolean {
+  if (args[0] === "run" && args[1] === "-T") {
+    return args[2] === "lore" && argsStartWith(args.slice(3), loreArgs)
+  }
+  return args[0] === "lore" && argsStartWith(args.slice(1), loreArgs)
+}
+
+function argsStartWith(args: readonly string[], expected: readonly string[]): boolean {
+  return expected.every((arg, index) => args[index] === arg)
+}
+
+function stripSurroundingQuotes(value: string): string {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1)
+  }
+  return value
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null
+}
+
+function stringArray(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : null
+}
+
+function extractTomlStringValue(text: string, key: string): string | null {
+  const raw = extractTomlBareKeyValue(text, key)
+  if (!raw) return null
+  const parsed = parseTomlString(raw)
+  return typeof parsed === "string" ? parsed : null
+}
+
+function extractTomlStringArray(text: string, key: string): string[] | null {
+  const raw = extractTomlBareKeyValue(text, key)
+  if (!raw) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return stringArray(parsed)
+  } catch {
+    return null
+  }
+}
+
+function extractTomlBareKeyValue(text: string, key: string): string | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const pattern = new RegExp(`^\\s*${escaped}\\s*=\\s*(.+?)\\s*(?:#.*)?$`)
+  for (const line of splitTomlLines(text)) {
+    const match = pattern.exec(line)
+    if (match) return match[1]!.trim()
+  }
+  return null
+}
+
+function parseTomlString(value: string): unknown {
+  try {
+    return JSON.parse(value)
+  } catch {
+    if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1)
+    return null
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function expandHome(path: string): string {
