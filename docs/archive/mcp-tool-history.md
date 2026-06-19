@@ -69,6 +69,13 @@ Historical bumps and what they signalled:
 
 Latest historical note:
 
+- `0.19.1` (2026-06-19) ships `lore doctor` support for repo-managed MCP and
+  hook launchers. Doctor now reports committed launchers that clearly dispatch
+  to `lore mcp` through local wrappers as `launcher: custom`, recognizes
+  project-scoped Claude Code hook settings, and keeps stale or side-effecting
+  launcher/hook shapes actionable. This release changes agent/operator-visible
+  CLI setup diagnostics; the package, lockfile, MCP handshake, CLI version,
+  and Notion `User-Agent` literals move together under the version-sync guard.
 - `0.19.0` (2026-06-08) ships planned semantic search for
   `lore-query action='search'`. Agents can opt between `strategy: "planned"`
   and `"direct"` and can observe sanitized query variants, query-plan metadata,
