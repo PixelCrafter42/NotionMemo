@@ -11,6 +11,15 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-06-19
+
+### Fixed
+
+- `lore doctor` now treats repo-managed MCP launchers that clearly dispatch to
+  `lore mcp` as custom launchers instead of stale installer drift, recognizes
+  project-scoped Claude Code hook settings, and still flags stale or
+  side-effecting launcher and hook shapes. (#955, #956)
+
 ## [0.19.0] - 2026-06-08
 
 ### Added
@@ -1216,7 +1225,9 @@ move atomically per the release-coordinator pattern (#13).
   `lore migrate --migrate-tracking-to-tasks` still works; on 0.6.0
   the prose updates to reflect the migration command's removal.
 
-[Unreleased]: https://github.com/makenotion/lore/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/makenotion/lore/compare/v0.19.1...HEAD
+[0.19.1]: https://github.com/makenotion/lore/compare/v0.19.0...v0.19.1
+[0.19.0]: https://github.com/makenotion/lore/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/makenotion/lore/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/makenotion/lore/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/makenotion/lore/compare/v0.16.0...v0.17.0
