@@ -20,13 +20,17 @@ context loading and session saving into supported hosts.
 
 ### 1. Install Lore
 
-> **Public npm publish is intentionally parked.** Lore still publishes
-> internal-only releases to GitHub Packages while the team finishes the
-> rollout. External users should install from a local clone for now.
-> Internal Notion engineers can install the package from GitHub Packages
-> after configuring the `@makenotion` registry mapping.
+#### Install from npm (recommended)
 
-#### Option A — local clone
+```bash
+npm install -g @makenotion/lore
+# or
+npm install -D @makenotion/lore
+```
+
+Public npm requires no registry configuration or package token.
+
+#### Build from source
 
 ```bash
 git clone https://github.com/makenotion/lore.git
@@ -34,37 +38,14 @@ cd lore && npm install && npm run build && npm link
 ```
 
 `npm link` makes `lore` available globally on your `PATH` from the clone.
-Run `lore --version` to confirm, then continue with step 2 below.
+Run `lore --version` to confirm either installation route, then continue with
+step 2 below.
 
-#### Option B — internal GitHub Packages install
-
-Configure GitHub Packages access once:
-
-```bash
-gh auth refresh -h github.com -s read:packages
-export GITHUB_PACKAGES_TOKEN="$(gh auth token)"
-```
-
-Then ensure your npm config maps the `@makenotion` scope to GitHub Packages:
-
-```ini
-@makenotion:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
-```
-
-Install the package:
-
-```bash
-npm install -g @makenotion/lore                       # global CLI
-# or
-npm install -D @makenotion/lore  # or  yarn add -D    # project-local
-```
-
-For project-local installs, run `npx lore <command>` from inside the
-project or add a `lore` script to `package.json`. See
-[`docs/dev-dependency-install.md`](docs/dev-dependency-install.md) for
-the Yarn PnP wiring and path-portable setup teams use to share assistant
-config across a repo.
+For project-local installs, run `npx lore <command>` from inside the project
+or add a `lore` script to `package.json`. See
+[`docs/dev-dependency-install.md`](docs/dev-dependency-install.md) for the
+Yarn PnP wiring and path-portable setup teams use to share assistant config
+across a repo.
 
 ### 2. Join an Existing Shared Vault
 
