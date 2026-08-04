@@ -30,6 +30,9 @@ checkout.
      `{ "command": "yarn", "args": ["run", "-T", "lore", "mcp"] }` for Yarn
      PnP, or `{ "command": "lore", "args": ["mcp"] }` for npm / Yarn 1
      (auto-detected via `.pnp.cjs`).
+   - `.omp/mcp.json` for OMP with the same MCP command / args shape. OMP's
+     native project config takes precedence over root `.mcp.json` and exposes
+     Lore's MCP tools without Lore lifecycle hooks.
    - `.codex/config.toml` with the Lore MCP server and
      `features.hooks = true`, plus `.codex/hooks.json` entries for
      `UserPromptSubmit` and `Stop` using `yarn run -T lore hooks <event>` (PnP)
@@ -40,8 +43,11 @@ checkout.
    - Per-user Claude Code hook settings under
      `~/.claude/projects/<encoded-project>/settings.json` with
      `"command": "cd \"$CLAUDE_PROJECT_DIR\" && yarn run -T lore hooks <event>"`
-     (PnP) or
-     `"command": "cd \"$CLAUDE_PROJECT_DIR\" && lore hooks <event>"` (npm).
+     (PnP) or `"command": "cd \"$CLAUDE_PROJECT_DIR\" && lore hooks <event>"`
+     (npm).
+
+   OMP is MCP-only: it receives no Claude/Codex lifecycle hooks. Restart OMP
+   or run `/mcp reload` after installing or changing `.omp/mcp.json`.
 
 3. **Teach the repo's agents to prefer Lore.** Add a short "Memory and
    note-taking" section to the repo's `AGENTS.md` and `CLAUDE.md` so agents know
@@ -50,8 +56,9 @@ checkout.
    pasteable starter.
 
 4. **Commit the project-local diff.** Under the default `--client all` flow,
-   commit the generated `.mcp.json`, `.codex/config.toml`, `.codex/hooks.json`,
-   `.cursor/mcp.json`, and docs changes that landed in the repo.
+   commit the generated `.mcp.json`, `.omp/mcp.json`, `.codex/config.toml`,
+   `.codex/hooks.json`, `.cursor/mcp.json`, and docs changes that landed in the
+   repo.
 
 
    **Yarn PnP consumers**: the committed files work on any teammate's fresh

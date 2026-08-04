@@ -1939,6 +1939,82 @@ describe("lore-search projectName resolution", () => {
   })
 })
 
+describe("lore-memory action='search'", () => {
+  it("dispatches the OMP-compatible direct search payload", async () => {
+    const mockServer = createMockServer()
+    const memoriesSearch = vi.fn(async (input: { mode?: string }) =>
+      input.mode === "semantic"
+        ? [makeMemory("mem-1", { title: "OMP persistence", content: "marker-a" })]
+        : []
+    )
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { findByName: vi.fn() },
+      memories: { search: memoriesSearch },
+      context: { project: null },
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    const search = mockServer.getActionHandler("lore-memory", "search")
+
+    const result = await search({
+      query: "marker-a",
+      limit: 5,
+      mode: "contains",
+      strategy: "direct",
+      includeContent: true,
+    } as never)
+
+    const response = z
+      .object({ content: z.array(z.object({ text: z.string() })) })
+      .parse(result)
+    expect(response.content[0]?.text).toContain("Memory ID: `mem-1`")
+
+    expect(memoriesSearch).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ query: "marker-a", limit: 5, mode: "contains" })
+    )
+    expect(memoriesSearch).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        query: "marker-a",
+        limit: 5,
+        mode: "semantic",
+        includeContent: true,
+      })
+    )
+  })
+
+  it("keeps the contains no-result response when semantic candidates lack the marker", async () => {
+    const mockServer = createMockServer()
+    const memoriesSearch = vi.fn(async (input: { mode?: string }) =>
+      input.mode === "semantic"
+        ? [makeMemory("mem-1", { title: "OMP persistence", content: "marker-a" })]
+        : []
+    )
+    const services = {
+      projects: { findByName: vi.fn() },
+      topics: { findByName: vi.fn() },
+      memories: { search: memoriesSearch },
+      context: { project: null },
+    }
+
+    registerMemoryTools(mockServer.server, services as never)
+    const search = mockServer.getActionHandler("lore-memory", "search")
+    const result = await search({
+      query: "marker-b",
+      mode: "contains",
+      strategy: "direct",
+      includeContent: true,
+    } as never)
+    const response = z
+      .object({ content: z.array(z.object({ text: z.string() })) })
+      .parse(result)
+
+    expect(response.content[0]?.text).toBe('No memories found for: "marker-b"')
+  })
+})
+
 describe("lore-recall content-off default", () => {
   // The default `includeContent: false` keeps the hot path at one Notion
   // round-trip per page. Eager bodies are opt-in because agents almost

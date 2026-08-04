@@ -1,4 +1,5 @@
 import { Command } from "commander"
+import { realpathSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -74,6 +75,7 @@ interface HostConfigInspection {
 
 interface HostConfigRoots {
   claude: string
+  omp: string
   codex: string
   cursor: string
 }
@@ -489,11 +491,21 @@ async function inspectHostConfig(
 ): Promise<HostCheck> {
   const problems: DoctorProblem[] = []
   const lines: string[] = []
-  const [claudeYarnPnp, codexYarnPnp, cursorYarnPnp] = await Promise.all([
+  const [ompYarnPnp, claudeYarnPnp, codexYarnPnp, cursorYarnPnp] = await Promise.all([
+    detectYarnPnp(roots.omp),
     detectYarnPnp(roots.claude),
     detectYarnPnp(roots.codex),
     detectYarnPnp(roots.cursor),
   ])
+
+  const ompMcp = await inspectJsonMcpFile(
+    ".omp/mcp.json",
+    join(roots.omp, ".omp", "mcp.json"),
+    expectedConfigRoot,
+    { launcher: { kind: "claude", inspect: { ...inspect, yarnPnp: ompYarnPnp } } }
+  )
+  lines.push(...ompMcp.lines)
+  problems.push(...ompMcp.problems)
 
   const claudeMcp = await inspectJsonMcpFile(
     ".mcp.json",
@@ -570,8 +582,9 @@ async function resolveHostConfigRoots(
   cwd: string,
   fallbackRoot: string
 ): Promise<HostConfigRoots> {
-  const [claude, codex, cursor] = await Promise.all([
+  const [claude, omp, codex, cursor] = await Promise.all([
     findNearestHostConfigRoot(cwd, [[".mcp.json"]], fallbackRoot),
+    findNearestHostConfigRoot(cwd, [[".omp", "mcp.json"]], fallbackRoot),
     findNearestHostConfigRoot(
       cwd,
       [
@@ -582,7 +595,7 @@ async function resolveHostConfigRoots(
     ),
     findNearestHostConfigRoot(cwd, [[".cursor", "mcp.json"]], fallbackRoot),
   ])
-  return { claude, codex, cursor }
+  return { claude, omp, codex, cursor }
 }
 
 async function findNearestHostConfigRoot(
@@ -686,16 +699,21 @@ function classifyJsonMcpLauncher(
   loreEntry: Record<string, unknown>,
   launcher: JsonMcpLauncher
 ): DoctorLauncherStatus {
+  const entryConfigRoot = objectRecord(loreEntry["env"])?.["LORE_CONFIG_ROOT"]
+  const inspect =
+    typeof entryConfigRoot === "string" && entryConfigRoot
+      ? { ...launcher.inspect, configRoot: entryConfigRoot }
+      : launcher.inspect
   const notionBaseUrlLiteral = extractJsonMcpNotionBaseUrlLiteral(loreEntry)
   let status: HookStatus
   if (launcher.kind === "claude") {
     status = classifyClaudeMcpLauncher(loreEntry, {
-      ...launcherOptions(launcher.inspect),
+      ...launcherOptions(inspect),
       notionBaseUrlLiteral,
     })
   } else {
     status = classifyCursorMcpLauncher(loreEntry, {
-      ...launcherOptions(launcher.inspect),
+      ...launcherOptions(inspect),
       notionBaseUrlLiteral,
       useGlobalScope: launcher.useGlobalScope,
       launchCwd: launcher.launchCwd,
@@ -858,14 +876,24 @@ function compareConfigRoot(
       problem: false,
     }
   }
-  const normalizedActual = resolve(expandHome(actualRoot))
-  const normalizedExpected = resolve(expectedConfigRoot)
+  const resolvedActual = resolve(expandHome(actualRoot))
+  const resolvedExpected = resolve(expectedConfigRoot)
+  const normalizedActual = normalizeConfigRoot(resolvedActual)
+  const normalizedExpected = normalizeConfigRoot(resolvedExpected)
   if (normalizedActual === normalizedExpected) {
-    return { line: `LORE_CONFIG_ROOT: matches ${normalizedExpected}`, problem: false }
+    return { line: `LORE_CONFIG_ROOT: matches ${resolvedExpected}`, problem: false }
   }
   return {
-    line: `LORE_CONFIG_ROOT: ${normalizedActual} (expected ${normalizedExpected})`,
+    line: `LORE_CONFIG_ROOT: ${resolvedActual} (expected ${resolvedExpected})`,
     problem: true,
+  }
+}
+
+function normalizeConfigRoot(resolvedPath: string): string {
+  try {
+    return realpathSync.native(resolvedPath)
+  } catch {
+    return resolvedPath
   }
 }
 

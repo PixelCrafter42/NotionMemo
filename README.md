@@ -6,8 +6,8 @@ Lore gives your AI assistants a persistent, shared memory: it stores
 conversations, decisions, follow-up tasks, and durable relationships as Notion
 pages that any teammate or agent session can read back. Anything you use with
 the [Model Context Protocol](https://modelcontextprotocol.io) (Claude Code,
-Codex, Cursor, and other MCP hosts) can recall, save, and reason over the same
-vault, so context survives `/clear`, new branches, and handoffs between
+Codex, Cursor, OMP, and other MCP hosts) can recall, save, and reason over the
+same vault, so context survives `/clear`, new branches, and handoffs between
 people.
 
 Under the hood, Lore organizes a vault into five core Notion databases:
@@ -135,15 +135,16 @@ lore install
 ```
 
 Both install paths configure every supported assistant integration
-(`--client all`) and fill in any missing side from an older install. Use
-`--client` to install only one. Keep `--ntn` on client-scoped commands when
-using the internal ntn path; omit it for the PAT path after exporting
-`NOTION_API_TOKEN`:
+(`--client all`, including OMP) and fill in any missing side from an older
+install. Use `--client` to install only one. Keep `--ntn` on client-scoped
+commands when using the internal ntn path; omit it for the PAT path after
+exporting `NOTION_API_TOKEN`:
 
 ```bash
 lore install --ntn --client claude
 lore install --ntn --client codex
 lore install --ntn --client cursor
+lore install --ntn --client omp
 lore install --ntn --client cursor --cursor-global
 ```
 
@@ -151,13 +152,19 @@ lore install --ntn --client cursor --cursor-global
 - `codex`: writes `.codex/config.toml` plus `.codex/hooks.json`
 - `cursor`: writes `<projectDir>/.cursor/mcp.json`
   (`--cursor-global` opts into `~/.cursor/mcp.json`)
+- `omp`: writes the project `.omp/mcp.json`
+
+OMP's native `.omp/mcp.json` takes precedence over a root `.mcp.json` for OMP
+discovery. OMP receives Lore's MCP tools without Claude/Codex lifecycle hooks;
+restart OMP or run `/mcp reload` after installing or changing its config.
 
 Codex only loads project-scoped `.codex/*` files for trusted projects.
 
 Cursor's MCP runtime doesn't currently support session-end / Stop hooks, so
 the Cursor installer only writes the MCP entry; the Stop-triggered autosave
 and the detached auto-digest spawn run only under Claude Code or Codex.
-Recall / save / scan paths work identically across all three.
+Recall / save / scan paths work identically across Claude Code, Codex, Cursor,
+and OMP.
 
 #### Other MCP Hosts
 
@@ -165,9 +172,11 @@ For agents not directly supported by `lore install --client`, run
 `lore install --print-config json` or `lore install --print-config toml` and
 paste the emitted MCP server snippet into the host's config file. See
 [`docs/mcp-hosts.md`](docs/mcp-hosts.md) for host notes and hook limitations.
+OMP is already supported natively; do not use `--print-config` for OMP.
 
 Restart or reconnect your assistant after `lore install` or manual host config
-changes so it reloads the MCP server and hooks.
+changes so it reloads the MCP server. For OMP, `/mcp reload` is also available;
+OMP does not install Lore lifecycle hooks.
 
 ### 4. Advanced and Maintenance Flows
 

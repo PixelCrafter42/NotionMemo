@@ -1,7 +1,7 @@
 import type { AuthSource } from "../../../config.js"
 import type { RuntimeForwardedKey } from "../../../auth/forwarded-env.js"
 
-export type InstallClient = "claude" | "codex" | "cursor" | "all"
+export type InstallClient = "claude" | "codex" | "cursor" | "omp" | "all"
 
 /**
  * Status of a single Lore-owned config entry on disk.

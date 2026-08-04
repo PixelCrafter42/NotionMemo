@@ -92,7 +92,7 @@ export async function handleRecall(
           meta: defaultMemoryMetaBuilder,
           body: withContent ? m.content : undefined,
           includeSynopsis,
-          detailLines: memoryHandleDetailLines(resultSet, index),
+          detailLines: memoryHandleDetailLines(resultSet, index, m.id),
         })
       )
       .join("\n\n---\n\n")
@@ -133,6 +133,8 @@ export interface SearchArgs {
   limit?: number
   includeContent?: boolean
   includeSynopsis?: boolean
+  /** Internal compatibility rendering flag for callers that require durable page IDs. */
+  includeIds?: boolean
   mode?: SearchMode
   strategy?: SearchStrategy
   explain?: boolean
@@ -242,7 +244,7 @@ export async function handleSearch(
           meta: defaultMemoryMetaBuilder,
           body: withContent ? m.content : undefined,
           includeSynopsis,
-          detailLines: memoryHandleDetailLines(resultSet, index),
+          detailLines: memoryHandleDetailLines(resultSet, index, m.id, args.includeIds),
         })
       )
       .join("\n\n---\n\n")
@@ -293,11 +295,14 @@ function formatResultSetHeader(resultSet: MemoryResultSetRegistration | null): s
 
 function memoryHandleDetailLines(
   resultSet: MemoryResultSetRegistration | null,
-  index: number
+  index: number,
+  memoryId: string,
+  includeIds = false
 ): string[] | undefined {
+  const details = includeIds ? [`Memory ID: \`${memoryId}\``] : []
   const handle = resultSet?.handles[index]
-  if (!handle) return undefined
-  return [`Handle: \`${handle}\``]
+  if (handle) details.push(`Handle: \`${handle}\``)
+  return details.length > 0 ? details : undefined
 }
 
 function formatBodiesFooter(

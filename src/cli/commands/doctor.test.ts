@@ -1,5 +1,5 @@
 import type { Client } from "@notionhq/client"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -72,6 +72,73 @@ function writeClaudeMcp(
             command: "lore",
             args: ["mcp"],
             env,
+          },
+        },
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  )
+}
+
+function writeOmpMcp(dir: string, configRoot = dir, yarnPnp = false): void {
+  const env: Record<string, string> = {
+    LORE_SUPPRESS_DEPRECATIONS: "1",
+  }
+  if (!yarnPnp) env["LORE_CONFIG_ROOT"] = configRoot
+  mkdirSync(join(dir, ".omp"), { recursive: true })
+  writeFileSync(
+    join(dir, ".omp", "mcp.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          lore: {
+            command: yarnPnp ? "yarn" : "lore",
+            args: yarnPnp ? ["run", "-T", "lore", "mcp"] : ["mcp"],
+            env,
+          },
+        },
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  )
+}
+
+function writeStaleOmpMcp(dir: string, configRoot = dir): void {
+  mkdirSync(join(dir, ".omp"), { recursive: true })
+  writeFileSync(
+    join(dir, ".omp", "mcp.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          lore: {
+            command: "node",
+            args: ["/tmp/old-lore/dist/mcp.js"],
+            cwd: dir,
+            env: { LORE_CONFIG_ROOT: configRoot, LORE_SUPPRESS_DEPRECATIONS: "1" },
+          },
+        },
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  )
+}
+
+function writeUnrelatedOmpMcp(dir: string): void {
+  mkdirSync(join(dir, ".omp"), { recursive: true })
+  writeFileSync(
+    join(dir, ".omp", "mcp.json"),
+    JSON.stringify(
+      {
+        mcpServers: {
+          search: {
+            command: "search-mcp",
+            args: ["serve"],
           },
         },
       },
@@ -528,6 +595,184 @@ describe("runDoctor", () => {
     expect(output).toContain(".mcp.json: Lore MCP entry present")
     expect(output).toContain(".codex/config.toml: Lore MCP entry present")
     expect(output).toContain(`LORE_CONFIG_ROOT: matches ${cwd}`)
+  })
+
+  it("reports a missing project OMP config as informational", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(".omp/mcp.json: not present")
+    expect(output).toContain("Next action:\n  No action needed.")
+  })
+
+  it("reports a current bare OMP launcher and matching config root", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+    writeOmpMcp(cwd)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain(`LORE_CONFIG_ROOT: matches ${cwd}`)
+    expect(output).toContain("launcher: current")
+    expect(output).toContain("Next action:\n  No action needed.")
+  })
+
+  it("treats symlink aliases for the same OMP config root as matching", async () => {
+    const cwd = makeTempDir()
+    const aliasParent = makeTempDir()
+    const alias = join(aliasParent, "vault-alias")
+    symlinkSync(cwd, alias, "dir")
+    writeConfig(cwd)
+    writeOmpMcp(cwd, alias)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain("LORE_CONFIG_ROOT: matches ")
+    expect(output).toContain("launcher: current")
+  })
+
+  it("reports a current Yarn OMP launcher without requiring a config root", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+    writeFileSync(join(cwd, ".pnp.cjs"), "", "utf-8")
+    writeOmpMcp(cwd, cwd, true)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain("LORE_CONFIG_ROOT: not carried by entry")
+    expect(output).toContain("launcher: current")
+    expect(output).toContain("Next action:\n  No action needed.")
+  })
+
+  it("fails a stale OMP config root with lore install", async () => {
+    const cwd = makeTempDir()
+    const wrongRoot = makeTempDir()
+    writeConfig(cwd)
+    writeOmpMcp(cwd, wrongRoot)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(1)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain(`LORE_CONFIG_ROOT: ${wrongRoot} (expected ${cwd})`)
+    expect(output).toContain("Next action:\n  lore install")
+  })
+
+  it("fails a stale OMP launcher with lore install", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+    writeStaleOmpMcp(cwd)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(1)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain(`LORE_CONFIG_ROOT: matches ${cwd}`)
+    expect(output).toContain("launcher: stale")
+    expect(
+      result.problems.some(
+        (problem) => problem.message === ".omp/mcp.json has a stale Lore MCP launcher."
+      )
+    ).toBe(true)
+    expect(output).toContain("Next action:\n  lore install")
+  })
+
+  it("fails invalid OMP JSON with lore install", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+    mkdirSync(join(cwd, ".omp"), { recursive: true })
+    writeFileSync(join(cwd, ".omp", "mcp.json"), "{", "utf-8")
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(1)
+    expect(output).toContain(".omp/mcp.json: invalid JSON")
+    expect(output).toContain("Next action:\n  lore install")
+  })
+
+  it("keeps an unrelated OMP server informational", async () => {
+    const cwd = makeTempDir()
+    writeConfig(cwd)
+    writeUnrelatedOmpMcp(cwd)
+
+    const result = await runDoctor({ cwd, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(".omp/mcp.json: present, Lore MCP entry missing")
+    expect(output).toContain("Next action:\n  No action needed.")
+  })
+
+  it("discovers a nested-cwd OMP config by walking upward", async () => {
+    const root = makeTempDir()
+    const child = join(root, "packages", "nested")
+    mkdirSync(child, { recursive: true })
+    writeConfig(root)
+    writeOmpMcp(root)
+
+    const result = await runDoctor({ cwd: child, deps: makeDeps(), emit: false, env: {} })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(0)
+    expect(output).toContain(`Normal discovery: ${join(root, ".lore.yaml")}`)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain(`LORE_CONFIG_ROOT: matches ${root}`)
+    expect(output).toContain("launcher: current")
+    expect(output).toContain("Next action:\n  No action needed.")
+  })
+
+  it("diagnoses OMP and Claude configs independently when they coexist", async () => {
+    const cwd = makeTempDir()
+    const homeDir = makeTempDir()
+    writeConfig(cwd)
+    writeOmpMcp(cwd)
+    writeStaleClaudeMcp(cwd)
+    writeClaudeHooks(cwd, homeDir)
+
+    const result = await runDoctor({
+      cwd,
+      homeDir,
+      deps: makeDeps(),
+      emit: false,
+      env: {},
+    })
+
+    const output = result.lines.join("\n")
+    expect(result.exitCode).toBe(1)
+    expect(output).toContain(".omp/mcp.json: Lore MCP entry present")
+    expect(output).toContain(
+      `.omp/mcp.json: Lore MCP entry present\n    LORE_CONFIG_ROOT: matches ${cwd}\n    launcher: current`
+    )
+    expect(output).toContain(".mcp.json: Lore MCP entry present")
+    expect(output).not.toContain("shadowed by .omp/mcp.json")
+    expect(output).toContain("launcher: stale")
+    expect(
+      result.problems.some(
+        (problem) => problem.message === ".mcp.json has a stale Lore MCP launcher."
+      )
+    ).toBe(true)
+    expect(
+      result.problems.some(
+        (problem) => problem.message === ".omp/mcp.json has a stale Lore MCP launcher."
+      )
+    ).toBe(false)
+    expect(output).toContain("Next action:\n  lore install")
   })
 
   it("uses Claude Code home-scoped settings for healthy hooks", async () => {

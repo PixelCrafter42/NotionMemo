@@ -18,6 +18,7 @@ import { handleHistory } from "./memory/history.js"
 import { handlePromote } from "./memory/promote.js"
 import { handleReview } from "./memory/review.js"
 import { handleSave } from "./memory/save.js"
+import { handleSearch } from "./memory/read.js"
 import { createMemoryDispatchSchema } from "./memory/schema.js"
 import { handleSuggestTopicKey } from "./memory/suggest-topic-key.js"
 import {
@@ -48,7 +49,8 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
     {
       title: "Memory operations",
       description:
-        "Save, update, archive, expand, history, suggest a topic key, compare, or review memory. Action-dispatched:\n\n" +
+        "Memory operations. Action-dispatched:\n\n" +
+        "- `action: 'search'` — search memories by contains, semantic, or hybrid retrieval.\n" +
         "- `action: 'save'` — create a memory; duplicate-probes in parallel. With `topicKey`, upserts by key + project-set and appends a revision. With `subject` + `replace: true`, writes current state under `state/<slug>`: one wake-up row, revision history intact.\n" +
         "- `action: 'update'` — mutate an existing memory's title, body, tags, kind, status, or relations. Any field omitted is left untouched. Rejects with `MemoryReadOnlyError` on read-only pinned blocks; use `lore-pinned action='update'` with `force: true` to override.\n" +
         "- `action: 'archive'` — soft-delete a memory by ID (Notion archive flag).\n" +
@@ -58,13 +60,14 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
         "- `action: 'compare'` — record a verdict on a memory pair (`conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict`). Asymmetric verdicts require `affectedMemoryId`. Idempotent on `(pair, verdict, affected)`.\n" +
         "- `action: 'approve'` / `'reject'` — inbox-review a `Status: proposed` memory (#281); flips Status and appends a Reviewed audit block.\n" +
         "- `action: 'promote'` — copy to a `promotionTargets` entry with origin audit; review-required targets create `Status: proposed`; reruns reuse `Promotion Source Key`.\n\n" +
-        "For pinned context blocks (always-visible governing memory rendered in wake-up before relevance-ranked sections), use `lore-pinned`.\n\n" +
+        "Use `lore-pinned` for pinned context blocks.\n\n" +
         "For architectural decisions prefer `lore-decision` with `action: 'create'` — it captures structured rationale and supersession chains.\n\n" +
         "`tags` is a closed vocabulary; for free-form labels (PR numbers, file paths, IDs) use `keywords`.",
       inputSchema: {
         action: z
           .enum([
             "save",
+            "search",
             "update",
             "archive",
             "expand",
@@ -76,8 +79,29 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
             "promote",
           ])
           .describe(
-            "Operation: save | update | archive | expand | history | suggest-topic-key | compare | approve | reject | promote."
+            "Operation: search | save | update | archive | expand | history | suggest-topic-key | compare | approve | reject | promote."
           ),
+        // search
+        query: z.string().optional().describe("(action='search') Search query."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("(action='search') Max results."),
+        includeContent: z
+          .boolean()
+          .optional()
+          .describe("(action='search') Include bodies."),
+        mode: z
+          .enum(["contains", "semantic", "hybrid"])
+          .optional()
+          .describe("(action='search') Mode."),
+        strategy: z
+          .enum(["direct", "planned"])
+          .optional()
+          .describe("(action='search') Strategy."),
         // save
         title: z
           .string()
@@ -319,6 +343,34 @@ export function registerMemoryTools(server: McpServer, services: LoreServices): 
       }
       const data = parsed.data
       switch (data.action) {
+        case "search": {
+          const containsResult = await handleSearch(services, {
+            ...data,
+            includeIds: true,
+          })
+          if (
+            data.mode !== "contains" ||
+            data.includeContent !== true ||
+            containsResult.content.some(
+              (item) =>
+                item.type === "text" && item.text.includes("No memories found for:")
+            ) === false
+          ) {
+            return containsResult
+          }
+          const semanticResult = await handleSearch(services, {
+            ...data,
+            mode: "semantic",
+            includeIds: true,
+          })
+          return semanticResult.content.some(
+            (item) =>
+              item.type === "text" &&
+              item.text.split("\n\n").slice(1).join("\n\n").includes(data.query)
+          )
+            ? semanticResult
+            : containsResult
+        }
         case "save":
           return withWakeUpCacheBump(services.wakeupCache, () =>
             handleSave(services, data)
