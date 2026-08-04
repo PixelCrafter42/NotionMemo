@@ -173,21 +173,8 @@ integration and distribute that shared token.
 
 ### Step 2 — Each engineer runs (one-time, ~2 minutes)
 
-Lore releases are still internal-only on GitHub Packages. Before installing
-the package, expose a GitHub Packages token and make sure npm maps the
-`@makenotion` scope to `https://npm.pkg.github.com`:
-
-```bash
-gh auth refresh -h github.com -s read:packages
-export GITHUB_PACKAGES_TOKEN="$(gh auth token)"
-```
-
-Add this to `~/.npmrc` if it is not already present:
-
-```ini
-@makenotion:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
-```
+Install Lore from public npm; no registry configuration or package token is
+required:
 
 ```bash
 # 1. Install Lore (if not already pinned as a devDependency in the team repo)

@@ -69,6 +69,10 @@ Historical bumps and what they signalled:
 
 Latest historical note:
 
+- `1.0.0` (2026-08-04) publishes Lore publicly as `@makenotion/lore` on npm.
+  The package metadata, lockfile, MCP handshake, CLI, and Notion `User-Agent`
+  version values move together under the existing version-sync guard.
+
 - `0.19.1` (2026-06-19) ships `lore doctor` support for repo-managed MCP and
   hook launchers. Doctor now reports committed launchers that clearly dispatch
   to `lore mcp` through local wrappers as `launcher: custom`, recognizes

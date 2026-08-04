@@ -11,6 +11,12 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-04
+
+### Changed
+
+- Lore is now available publicly on npm as `@makenotion/lore`.
+
 ## [0.19.1] - 2026-06-19
 
 ### Fixed
@@ -1225,7 +1231,8 @@ move atomically per the release-coordinator pattern (#13).
   `lore migrate --migrate-tracking-to-tasks` still works; on 0.6.0
   the prose updates to reflect the migration command's removal.
 
-[Unreleased]: https://github.com/makenotion/lore/compare/v0.19.1...HEAD
+[Unreleased]: https://github.com/makenotion/lore/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/makenotion/lore/compare/v0.19.1...v1.0.0
 [0.19.1]: https://github.com/makenotion/lore/compare/v0.19.0...v0.19.1
 [0.19.0]: https://github.com/makenotion/lore/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/makenotion/lore/compare/v0.18.0...v0.18.1
