@@ -81,6 +81,23 @@ export const HELP_RECIPES = [
       "Tags are profile-owned and closed-vocabulary; use keywords for free-form labels.",
     ],
   },
+
+  {
+    tool: "lore-memory",
+    action: "search",
+    summary:
+      "Search memory titles and bodies with direct contains, semantic, or hybrid retrieval.",
+    whenToUse:
+      "Use this when an MCP client needs a memory-only search action. Prefer lore-query action='search' for the broader vault read surface.",
+    example: {
+      action: "search",
+      query: "MCP persistence marker",
+      mode: "contains",
+      strategy: "direct",
+      includeContent: true,
+      limit: 5,
+    },
+  },
   {
     tool: "lore-memory",
     action: "update",

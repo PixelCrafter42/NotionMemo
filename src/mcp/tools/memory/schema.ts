@@ -78,6 +78,14 @@ export function createMemoryDispatchSchema(
       scope: scopeInputSchema,
     }),
     z.object({
+      action: z.literal("search"),
+      query: z.string(),
+      limit: z.number().int().min(1).max(50).optional(),
+      includeContent: z.boolean().optional(),
+      mode: z.enum(["contains", "semantic", "hybrid"]).optional(),
+      strategy: z.enum(["direct", "planned"]).optional(),
+    }),
+    z.object({
       action: z.literal("history"),
       subject: nonBlankString,
       projectName: z.string().optional(),

@@ -1,5 +1,10 @@
 # Unsupported MCP Hosts
 
+OMP is a supported native client. Run `lore install --client omp` from the
+project to write `.omp/mcp.json`; do not paste a `--print-config` snippet into
+OMP. OMP's native file takes precedence over a root `.mcp.json` and provides
+Lore's MCP tools without lifecycle hooks.
+
 For agents not directly supported by `lore install --client`, use
 `--print-config` to emit a paste-ready snippet for the appropriate format:
 
@@ -38,3 +43,5 @@ files are written; pipe the output into your agent's MCP config file by hand.
 > Stop-triggered autosave, wake-up injection, and detached auto-digest helpers.
 > Cursor and `--print-config` hosts get the MCP tool surface but not background
 > hooks.
+> OMP is supported separately through `.omp/mcp.json` and receives MCP tools
+> only; it does not install Claude/Codex lifecycle hooks.

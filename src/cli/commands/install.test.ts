@@ -33,6 +33,9 @@ import {
   buildCursorGlobalIgnoredNotice,
   buildCursorMcpEntry,
   buildLegacyClaudeMcpEntry,
+  OMP_MCP_SCHEMA_URL,
+  resolveOmpMcpPath,
+  runOmpInstall,
   buildLegacyCodexHookCommand,
   buildLegacyCodexMcpSection,
   buildLegacyCursorMcpEntry,
@@ -95,10 +98,11 @@ describe("install helpers", () => {
     expect(parseInstallClient(undefined)).toBe("all")
   })
 
-  it("accepts the four supported client values", () => {
+  it("accepts the five supported client values", () => {
     expect(parseInstallClient("claude")).toBe("claude")
     expect(parseInstallClient("codex")).toBe("codex")
     expect(parseInstallClient("cursor")).toBe("cursor")
+    expect(parseInstallClient("omp")).toBe("omp")
     expect(parseInstallClient("all")).toBe("all")
   })
 
@@ -497,14 +501,17 @@ describe("Cursor helpers", () => {
   it("buildCursorGlobalIgnoredNotice fires only when Cursor is out of scope", () => {
     // The action handler emits this note to stderr when an operator passes
     // `--cursor-global` alongside a `--client` value that doesn't include
-    // Cursor — Claude / Codex. For Cursor itself or `all` (where Cursor is
-    // one of the three branches), the flag is meaningful and no note is
-    // emitted.
+    // Cursor — Claude / Codex / OMP. For Cursor itself or `all` (where
+    // Cursor is one of the selected branches), the flag is meaningful and
+    // no note is emitted.
     expect(buildCursorGlobalIgnoredNotice(true, "claude")).toBe(
       "Note: --cursor-global has no effect under --client claude (Cursor not selected); ignored."
     )
     expect(buildCursorGlobalIgnoredNotice(true, "codex")).toBe(
       "Note: --cursor-global has no effect under --client codex (Cursor not selected); ignored."
+    )
+    expect(buildCursorGlobalIgnoredNotice(true, "omp")).toBe(
+      "Note: --cursor-global has no effect under --client omp (Cursor not selected); ignored."
     )
     expect(buildCursorGlobalIgnoredNotice(true, "cursor")).toBeNull()
     expect(buildCursorGlobalIgnoredNotice(true, "all")).toBeNull()
@@ -1383,6 +1390,251 @@ describe("runCursorInstall (integration)", () => {
   })
 })
 
+describe("runOmpInstall (integration)", () => {
+  const SCRATCH = mkdtempSync(join(tmpdir(), "lore-install-omp-test-"))
+
+  afterAll(() => {
+    rmSync(SCRATCH, { recursive: true, force: true })
+  })
+
+  afterEach(() => {
+    consoleLogSpy.mockClear()
+    consoleWarnSpy.mockClear()
+    consoleErrorSpy.mockClear()
+  })
+
+  function makeContext(
+    projectDir: string,
+    pkgRoot: string,
+    overrides: Partial<InstallContext> = {}
+  ): InstallContext {
+    return {
+      projectDir,
+      pkgRoot,
+      configRoot: projectDir,
+      autosavePath: join(pkgRoot, "hooks", "autosave.sh"),
+      wakeupPath: join(pkgRoot, "hooks", "wakeup.sh"),
+      mcpJsPath: join(pkgRoot, "dist", "mcp.js"),
+      skipPrompts: true,
+      legacyPaths: false,
+      yarnPnp: false,
+      wakeUpConfig: null,
+      ...overrides,
+    }
+  }
+
+  it("exports the project-scoped path and writes the canonical schema and bare entry", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "fresh-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+
+    expect(targetPath).toBe(join(projectDir, ".omp", "mcp.json"))
+    await runOmpInstall(makeContext(projectDir, pkgRoot), null, targetPath)
+
+    const written = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    expect(written.$schema).toBe(OMP_MCP_SCHEMA_URL)
+    expect((written.mcpServers as Record<string, unknown>).lore).toEqual(
+      buildClaudeMcpEntry("bare", projectDir, process.env)
+    )
+  })
+
+  it("preserves unrelated top-level content, servers, and an existing schema", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "preserve-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+    const seeded = {
+      $schema: "https://example.test/omp-schema.json",
+      custom: { enabled: true },
+      mcpServers: {
+        other: { command: "node", args: ["other.js"] },
+      },
+    }
+    mkdirSync(join(projectDir, ".omp"), { recursive: true })
+    writeFileSync(targetPath, JSON.stringify(seeded, null, 2))
+
+    await runOmpInstall(makeContext(projectDir, pkgRoot), null, targetPath)
+
+    const written = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    expect(written.$schema).toBe(seeded.$schema)
+    expect(written.custom).toEqual(seeded.custom)
+    expect((written.mcpServers as Record<string, unknown>).other).toEqual(
+      seeded.mcpServers.other
+    )
+  })
+
+  it("replaces a stale entry while preserving unrelated servers", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "stale-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+    mkdirSync(join(projectDir, ".omp"), { recursive: true })
+    writeFileSync(
+      targetPath,
+      JSON.stringify(
+        {
+          mcpServers: {
+            other: { command: "node", args: ["other.js"] },
+            lore: { command: "node", args: ["/old/mcp.js"], env: {} },
+          },
+        },
+        null,
+        2
+      )
+    )
+
+    await runOmpInstall(makeContext(projectDir, pkgRoot), null, targetPath)
+
+    const written = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const servers = written.mcpServers as Record<string, unknown>
+    expect(servers.other).toEqual({ command: "node", args: ["other.js"] })
+    expect(servers.lore).toEqual(buildClaudeMcpEntry("bare", projectDir, process.env))
+    expect(written.$schema).toBe(OMP_MCP_SCHEMA_URL)
+  })
+
+  it("does not rewrite a current entry or add a missing optional schema", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "idempotent-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+    const current = {
+      mcpServers: {
+        lore: buildClaudeMcpEntry("bare", projectDir, process.env),
+      },
+    }
+    mkdirSync(join(projectDir, ".omp"), { recursive: true })
+    writeFileSync(targetPath, JSON.stringify(current, null, 2))
+    const before = await readFile(targetPath, "utf-8")
+
+    await runOmpInstall(makeContext(projectDir, pkgRoot), null, targetPath)
+
+    expect(await readFile(targetPath, "utf-8")).toBe(before)
+    expect(JSON.parse(before).$schema).toBeUndefined()
+  })
+
+  it("keeps the exact Yarn-PnP Claude entry and omits LORE_CONFIG_ROOT", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "yarn-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+
+    await runOmpInstall(
+      makeContext(projectDir, pkgRoot, { yarnPnp: true }),
+      null,
+      targetPath
+    )
+
+    const written = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const lore = (written.mcpServers as Record<string, unknown>).lore as {
+      command: string
+      args: string[]
+      env: Record<string, string>
+    }
+    expect(lore).toEqual(buildClaudeMcpEntry("yarn", projectDir, process.env))
+    expect(lore.command).toBe("yarn")
+    expect(lore.args).toEqual(["run", "-T", "lore", "mcp"])
+    expect(lore.env.LORE_CONFIG_ROOT).toBeUndefined()
+  })
+
+  it("writes the legacy launcher with LORE_CONFIG_ROOT and upgrades it by default", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "legacy-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+    const legacyContext = makeContext(projectDir, pkgRoot, { legacyPaths: true })
+
+    await runOmpInstall(legacyContext, null, targetPath)
+    const legacyWritten = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const legacyEntry = (legacyWritten.mcpServers as Record<string, unknown>).lore
+    expect(legacyEntry).toEqual(
+      buildLegacyClaudeMcpEntry(
+        toPortablePath(join(pkgRoot, "dist", "mcp.js")),
+        toPortablePath(pkgRoot),
+        projectDir,
+        process.env
+      )
+    )
+    expect((legacyEntry as { env: Record<string, string> }).env.LORE_CONFIG_ROOT).toBe(
+      projectDir
+    )
+
+    await runOmpInstall(makeContext(projectDir, pkgRoot), null, targetPath)
+    const upgraded = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    expect((upgraded.mcpServers as Record<string, unknown>).lore).toEqual(
+      buildClaudeMcpEntry("bare", projectDir, process.env)
+    )
+  })
+
+  it("suppresses auth placeholders and keeps the --dev base URL literal", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "env-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+    const targetPath = resolveOmpMcpPath(projectDir)
+    const oldToken = process.env.NOTION_API_TOKEN
+    const oldBaseUrl = process.env.NOTION_BASE_URL
+    process.env.NOTION_API_TOKEN = "install-token"
+    process.env.NOTION_BASE_URL = "https://api.notion.so"
+
+    try {
+      await runOmpInstall(
+        makeContext(projectDir, pkgRoot, {
+          authSource: "ntn-auth-json",
+          notionBaseUrlLiteral: "https://api-dev.notion.com",
+        }),
+        null,
+        targetPath
+      )
+    } finally {
+      if (oldToken === undefined) delete process.env.NOTION_API_TOKEN
+      else process.env.NOTION_API_TOKEN = oldToken
+      if (oldBaseUrl === undefined) delete process.env.NOTION_BASE_URL
+      else process.env.NOTION_BASE_URL = oldBaseUrl
+    }
+
+    const written = JSON.parse(await readFile(targetPath, "utf-8")) as Record<
+      string,
+      unknown
+    >
+    const env = (
+      (written.mcpServers as Record<string, unknown>).lore as {
+        env: Record<string, string>
+      }
+    ).env
+    expect(env.NOTION_API_TOKEN).toBeUndefined()
+    expect(env.NOTION_BASE_URL).toBe("https://api-dev.notion.com")
+    expect(Object.values(env)).not.toContain("${NOTION_BASE_URL}")
+  })
+
+  it("prints the OMP MCP-only summary after installation", async () => {
+    const projectDir = mkdtempSync(join(SCRATCH, "summary-"))
+    const pkgRoot = mkdtempSync(join(SCRATCH, "pkg-"))
+
+    await runOmpInstall(
+      makeContext(projectDir, pkgRoot),
+      null,
+      resolveOmpMcpPath(projectDir)
+    )
+
+    const output = consoleLogSpy.mock.calls.map((args) => args.join(" ")).join("\n")
+    expect(output).toContain(".omp/mcp.json")
+    expect(output).toContain("Lore's MCP tools")
+    expect(output).toContain("no Lore lifecycle hooks")
+    expect(output).toContain("/mcp reload")
+  })
+})
+
 describe("ensureHookPrerequisites", () => {
   // Hook prerequisites are now per-runner so a Cursor install isn't gated
   // on hook scripts that Cursor doesn't use. This block pins the new
@@ -1758,12 +2010,17 @@ describe("dispatchInstall (--client all orchestration)", () => {
   }
 
   function trackingRunners(
-    failures: { claude?: boolean; codex?: boolean; cursor?: boolean } = {}
+    failures: {
+      claude?: boolean
+      codex?: boolean
+      cursor?: boolean
+      omp?: boolean
+    } = {}
   ): {
     runners: InstallRunners
-    called: { claude: number; codex: number; cursor: number }
+    called: { claude: number; codex: number; cursor: number; omp: number }
   } {
-    const called = { claude: 0, codex: 0, cursor: 0 }
+    const called = { claude: 0, codex: 0, cursor: 0, omp: 0 }
     const runners: InstallRunners = {
       claude: async () => {
         called.claude++
@@ -1777,14 +2034,18 @@ describe("dispatchInstall (--client all orchestration)", () => {
         called.cursor++
         if (failures.cursor) throw new Error("cursor install failed (mock)")
       },
+      omp: async () => {
+        called.omp++
+        if (failures.omp) throw new Error("omp install failed (mock)")
+      },
     }
     return { runners, called }
   }
 
-  it("invokes all three runners under --client all on the happy path", async () => {
+  it("invokes all four runners under --client all on the happy path", async () => {
     const { runners, called } = trackingRunners()
     const errors = await dispatchInstall(makeContext(), null, { client: "all" }, runners)
-    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1 })
+    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1, omp: 1 })
     expect(errors).toHaveLength(0)
   })
 
@@ -1792,8 +2053,8 @@ describe("dispatchInstall (--client all orchestration)", () => {
     const { runners, called } = trackingRunners({ codex: true })
     const errors = await dispatchInstall(makeContext(), null, { client: "all" }, runners)
 
-    // All three runners ran even though Codex threw.
-    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1 })
+    // All four runners ran even though Codex threw.
+    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1, omp: 1 })
     expect(errors).toHaveLength(1)
     expect(errors[0]).toMatchObject({ client: "codex" })
     expect((errors[0]!.error as Error).message).toMatch(/codex install failed \(mock\)/)
@@ -1803,12 +2064,17 @@ describe("dispatchInstall (--client all orchestration)", () => {
     expect(stderr).toMatch(/codex: install failed \(codex install failed \(mock\)\)/)
   })
 
-  it("aggregates multiple failures across distinct clients", async () => {
-    const { runners, called } = trackingRunners({ claude: true, cursor: true })
+  it("aggregates failures from all four clients in fixed order", async () => {
+    const { runners, called } = trackingRunners({
+      claude: true,
+      codex: true,
+      cursor: true,
+      omp: true,
+    })
     const errors = await dispatchInstall(makeContext(), null, { client: "all" }, runners)
 
-    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1 })
-    expect(errors.map((e) => e.client).sort()).toEqual(["claude", "cursor"])
+    expect(called).toEqual({ claude: 1, codex: 1, cursor: 1, omp: 1 })
+    expect(errors.map((e) => e.client)).toEqual(["claude", "codex", "cursor", "omp"])
   })
 
   it("propagates a single-client throw without aggregation", async () => {
@@ -1818,7 +2084,28 @@ describe("dispatchInstall (--client all orchestration)", () => {
     await expect(
       dispatchInstall(makeContext(), null, { client: "claude" }, runners)
     ).rejects.toThrow(/claude install failed \(mock\)/)
-    expect(called).toEqual({ claude: 1, codex: 0, cursor: 0 })
+    expect(called).toEqual({ claude: 1, codex: 0, cursor: 0, omp: 0 })
+  })
+
+  it("only invokes the matching runner under --client omp", async () => {
+    const { runners, called } = trackingRunners()
+    const errors = await dispatchInstall(makeContext(), null, { client: "omp" }, runners)
+    expect(called).toEqual({ claude: 0, codex: 0, cursor: 0, omp: 1 })
+    expect(errors).toHaveLength(0)
+  })
+
+  it("passes the resolved project OMP path to the OMP runner", async () => {
+    let receivedPath: string | null = null
+    const runners: InstallRunners = {
+      claude: async () => {},
+      codex: async () => {},
+      cursor: async () => {},
+      omp: async (_ctx, _rl, ompMcpPath) => {
+        receivedPath = ompMcpPath
+      },
+    }
+    await dispatchInstall(makeContext(), null, { client: "omp" }, runners)
+    expect(receivedPath).toBe(resolveOmpMcpPath(makeContext().projectDir))
   })
 
   it("only invokes the matching runner under --client cursor", async () => {
@@ -1829,10 +2116,9 @@ describe("dispatchInstall (--client all orchestration)", () => {
       { client: "cursor", cursorGlobal: false },
       runners
     )
-    expect(called).toEqual({ claude: 0, codex: 0, cursor: 1 })
+    expect(called).toEqual({ claude: 0, codex: 0, cursor: 1, omp: 0 })
     expect(errors).toHaveLength(0)
   })
-
   it("forwards --cursor-global through to the cursor runner", async () => {
     let receivedGlobal: boolean | null = null
     let receivedPath: string | null = null
@@ -1843,6 +2129,7 @@ describe("dispatchInstall (--client all orchestration)", () => {
         receivedPath = cursorMcpPath
         receivedGlobal = global
       },
+      omp: async () => {},
     }
     await dispatchInstall(
       makeContext(),
@@ -1878,8 +2165,8 @@ describe("install command help", () => {
   it("keeps install options concise and omits runtime wiring details", () => {
     const help = installCommand.helpInformation()
 
-    expect(help).toContain(
-      "--client <assistant>     Assistant to configure: claude, codex, cursor, or all"
+    expect(help).toMatch(
+      /--client <assistant>\s+Assistant to configure: claude, codex, cursor, omp,\s+or all/
     )
     expect(help).toContain("--project <path>         Project directory (default: cwd)")
     expect(help).toContain(

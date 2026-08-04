@@ -14,6 +14,7 @@ import {
   resolveCursorMcpPath,
   runCursorInstall,
 } from "./cursor.js"
+import { resolveOmpMcpPath, runOmpInstall } from "./omp.js"
 import { parsePrintConfigFormat, runPrintConfig } from "./print-config.js"
 
 export interface InstallRunners {
@@ -31,14 +32,19 @@ export interface InstallRunners {
     cursorMcpPath: string,
     useGlobalScope: boolean
   ) => Promise<void>
+  omp: (
+    context: InstallContext,
+    rl: ReturnType<typeof createInterface> | null,
+    ompMcpPath: string
+  ) => Promise<void>
 }
 
 export const defaultInstallRunners: InstallRunners = {
   claude: runClaudeInstall,
   codex: runCodexInstall,
   cursor: runCursorInstall,
+  omp: runOmpInstall,
 }
-
 /**
  * Options consumed by `dispatchInstall`. A subset of `runInstall`'s opts —
  * the dispatcher only needs the routing target and the Cursor scope flag.
@@ -58,7 +64,7 @@ export interface DispatchOpts {
  * `process.exit(1)`).
  *
  * Splitting this out from `runInstall` lets tests drive orchestration —
- * "did all three runners get called when one threw?" — without needing
+ * "did all four runners get called when one threw?" — without needing
  * the standalone MCP entry and the hook scripts on disk.
  */
 export async function dispatchInstall(
@@ -69,6 +75,7 @@ export async function dispatchInstall(
 ): Promise<Array<{ client: string; error: unknown }>> {
   const errors: Array<{ client: string; error: unknown }> = []
   const cursorMcpPath = resolveCursorMcpPath(context.projectDir, !!opts.cursorGlobal)
+  const ompMcpPath = resolveOmpMcpPath(context.projectDir)
   const runWithCapture = async (
     client: string,
     fn: () => Promise<void>
@@ -98,6 +105,10 @@ export async function dispatchInstall(
       runners.cursor(context, rl, cursorMcpPath, !!opts.cursorGlobal)
     )
   }
+  if (opts.client === "all") console.log()
+  if (opts.client === "omp" || opts.client === "all") {
+    await runWithCapture("omp", () => runners.omp(context, rl, ompMcpPath))
+  }
 
   return errors
 }
@@ -124,8 +135,9 @@ export async function runInstall(
         ? "Codex Integration"
         : opts.client === "cursor"
           ? "Cursor Integration"
-          : "AI Assistant Integration"
-
+          : opts.client === "omp"
+            ? "OMP Integration"
+            : "AI Assistant Integration"
   console.log()
   console.log(`Lore — ${title}`)
   console.log("─".repeat(40))
@@ -221,7 +233,13 @@ function formatInstallError(err: unknown): string {
 
 export function parseInstallClient(value: string | undefined): InstallClient | null {
   if (value === undefined) return "all"
-  if (value === "claude" || value === "codex" || value === "cursor" || value === "all") {
+  if (
+    value === "claude" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "omp" ||
+    value === "all"
+  ) {
     return value
   }
   return null
@@ -229,7 +247,10 @@ export function parseInstallClient(value: string | undefined): InstallClient | n
 
 export const installCommand = new Command("install")
   .description("Install Lore assistant integrations for the current project")
-  .option("--client <assistant>", "Assistant to configure: claude, codex, cursor, or all")
+  .option(
+    "--client <assistant>",
+    "Assistant to configure: claude, codex, cursor, omp, or all"
+  )
   .option("--project <path>", "Project directory (default: cwd)")
   .option("--cursor-global", "Cursor only: write global Cursor MCP config")
   .option(
@@ -291,7 +312,7 @@ export const installCommand = new Command("install")
         const client = parseInstallClient(opts.client)
         if (!client) {
           console.error(
-            "Install failed: --client must be one of claude, codex, cursor, or all."
+            "Install failed: --client must be one of claude, codex, cursor, omp, or all."
           )
           process.exit(1)
         }

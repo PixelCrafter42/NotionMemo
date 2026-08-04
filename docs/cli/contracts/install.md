@@ -36,20 +36,24 @@ Auth and MCP environment:
   [`src/auth/forwarded-env.ts`](../../../src/auth/forwarded-env.ts). Static entries
   are assembled by `buildMcpEnv()` in
   [`src/cli/commands/install.ts`](../../../src/cli/commands/install.ts).
-- Project-scoped Yarn/PnP snippets for Claude, Codex, Cursor, and
-  `--print-config --yarn-pnp` intentionally omit `LORE_CONFIG_ROOT` and rely on
-  launch from the workspace root.
+- Project-scoped Yarn/PnP snippets for Claude, Codex, Cursor, OMP, and
+  `--print-config --yarn-pnp` intentionally omit `LORE_CONFIG_ROOT` and rely
+  on launch from the workspace root.
 - Install refuses to write MCP config when vault access preflight returns
   not-found.
 
 Assistant targets:
 
-- Default `lore install` updates Claude Code, Codex, and Cursor for the current
-  project.
+- Default `lore install` updates Claude Code, Codex, Cursor, and OMP for the
+  current project.
 - `--client claude` updates only Claude Code hooks and `.mcp.json`.
 - `--client codex` updates only `.codex/config.toml` and `.codex/hooks.json`.
 - `--client cursor` updates project `.cursor/mcp.json` or global
   `~/.cursor/mcp.json` with `--cursor-global`.
+- `--client omp` updates only the project `.omp/mcp.json`.
+- OMP's native `.omp/mcp.json` takes precedence over a root `.mcp.json` for
+  OMP discovery. OMP receives the Lore MCP tools only; it has no Lore
+  lifecycle hooks.
 - Codex hooks require `features.hooks = true` and trusted projects.
 - Cursor receives only an MCP entry because its runtime does not support the
   Stop/session-end hooks used by Claude Code and Codex.
@@ -63,7 +67,8 @@ Assistant targets:
 Cursor global precedence:
 
 - `--cursor-global` overrides `--project` only for the Cursor branch.
-- Under `--client all`, Claude and Codex still write project-scoped config.
+- Under `--client all`, Claude, Codex, and OMP still write project-scoped
+  config.
 - Under `--client claude` or `--client codex`, `--cursor-global` is ignored
   with a one-line stderr note and no exit-code change.
 
@@ -71,6 +76,8 @@ Print-config:
 
 - `--print-config json|toml` emits paste-ready MCP config to stdout and writes
   no files.
+- OMP is a supported native client, not a `--print-config` paste target; use
+  `lore install --client omp` to write `.omp/mcp.json`.
 - `--client` is accepted as a no-op. `--project` selects the config root
   embedded as `LORE_CONFIG_ROOT` for bare and legacy printed snippets.
 - `--yarn-pnp` printed snippets omit static `LORE_CONFIG_ROOT` and assume the
