@@ -106,6 +106,13 @@ describe("migrateCommand help", () => {
     expect(help).toContain("LORE_USE_RUNTOOL_AGGREGATE")
   })
 
+  it("documents --localize as a plan-then-apply vault UI rename", () => {
+    const help = migrateCommand.helpInformation()
+    expect(help).toContain("--localize")
+    expect(help).toContain("zh-CN")
+    expect(help).toContain("Plan-only by default")
+  })
+
   it("documents the fact confidence audit flag", () => {
     const help = migrateCommand.helpInformation()
     expect(help).toContain("--audit-fact-confidence")
@@ -126,6 +133,12 @@ describe("migrateCommand help", () => {
       isFactConfidenceAuditOnly({
         auditFactConfidence: true,
         fixFactEncoding: true,
+      })
+    ).toBe(false)
+    expect(
+      isFactConfidenceAuditOnly({
+        auditFactConfidence: true,
+        localize: "zh-CN",
       })
     ).toBe(false)
   })

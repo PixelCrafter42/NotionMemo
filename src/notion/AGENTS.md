@@ -103,10 +103,13 @@ The `isFullPage()` type guard narrows data-source query results to
    ```
 
    The `*_PROPS` constants are the single source of truth for Notion property
-   names. The schema-drift suite in `schema.test.ts` keeps each constant
-   aligned with the keys its builder function emits, so a rename made only on
-   one half cannot silently land. Test fixtures may keep bare literals for
-   wire-format readability when that intent is explicit.
+   names. TypeScript keys stay stable; the string values follow the active
+   vault UI locale (`en` or `zh-CN`) via `bindSchemaLocale()`. Do not invent
+   ad-hoc English or Chinese literals. The schema-drift suite in
+   `schema.test.ts` keeps each constant aligned with the keys its builder
+   function emits, so a rename made only on one half cannot silently land.
+   Test fixtures may keep bare literals for wire-format readability when that
+   intent is explicit. Select option values stay English.
 
 2. **Property configuration** (`PropertyConfig`) is used by `setup.ts` when
    creating databases. Builders compose the `*_PROPS` constants as computed

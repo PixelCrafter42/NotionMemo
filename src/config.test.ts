@@ -11,6 +11,26 @@ import {
 import type { LoreConfig } from "./types.js"
 
 describe("parseConfigAllowingInvalidHooks", () => {
+  it("accepts locale: zh-CN", () => {
+    const { config, warnings } = parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: abc123
+locale: zh-CN
+`)
+    expect(warnings).toEqual([])
+    expect(config.locale).toBe("zh-CN")
+  })
+
+  it("rejects an unknown locale", () => {
+    expect(() =>
+      parseConfigAllowingInvalidHooks(`
+vault:
+  pageId: abc123
+locale: zh
+`)
+    ).toThrow(/zh-CN/)
+  })
+
   it("preserves a valid hooks section", () => {
     const { config, warnings } = parseConfigAllowingInvalidHooks(`
 vault:

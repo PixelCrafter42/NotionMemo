@@ -26,6 +26,11 @@ import {
 import type { LoreConfig } from "../../types.js"
 import { defaultProfileSelector, resolveProfileFromConfig } from "../../profile/index.js"
 import {
+  bindSchemaLocale,
+  parseSchemaLocale,
+  type SchemaLocale,
+} from "../../notion/schema-locale.js"
+import {
   buildHookDisclosureLines as buildHookDisclosureLinesShared,
   buildHookYamlCommentBefore,
 } from "../hook-disclosure.js"
@@ -61,11 +66,13 @@ export const buildHookDisclosureLines = buildHookDisclosureLinesShared
 export function buildInitConfigYaml(
   pageId: string,
   workspaceId?: string,
-  profileSelector = defaultProfileSelector()
+  profileSelector = defaultProfileSelector(),
+  locale: SchemaLocale = "en"
 ): string {
   const config: LoreConfig = {
     vault: { pageId },
     profile: profileSelector,
+    ...(locale !== "en" && { locale }),
     ...(workspaceId !== undefined && {
       auth: { workspaceId },
     }),
@@ -239,6 +246,16 @@ function expectedBaseUrlForEnv(env: NtnEnv): string | undefined {
   return ntnEnvBaseUrl(env)
 }
 
+function resolveInitLocale(raw: string | undefined): SchemaLocale {
+  try {
+    return parseSchemaLocale(raw)
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exit(1)
+    throw err
+  }
+}
+
 function resolveInitProfile(profileSelector: string | undefined) {
   try {
     return resolveProfileFromConfig(profileSelector ? { profile: profileSelector } : {})
@@ -278,7 +295,13 @@ function formatDatabaseRef(ref: unknown): string {
  */
 export async function runExplicitPageInit(
   pageId: string,
-  opts: { token?: string; name?: string; ntnEnv?: string; profile?: string }
+  opts: {
+    token?: string
+    name?: string
+    ntnEnv?: string
+    profile?: string
+    locale?: string
+  }
 ): Promise<void> {
   if (opts.name && opts.name.trim().length > 0) {
     console.error(
@@ -297,6 +320,8 @@ export async function runExplicitPageInit(
     )
   }
   const profile = resolveInitProfile(opts.profile)
+  const locale = resolveInitLocale(opts.locale)
+  bindSchemaLocale(locale)
   // Two paths:
   // - `--token` provided: operator hands us a literal token. We don't
   //   know the base URL (the operator can set `LORE_NOTION_BASE_URL`
@@ -375,7 +400,7 @@ export async function runExplicitPageInit(
     // every subsequent command would re-discover.
     await writeFile(
       configPath,
-      buildInitConfigYaml(pageId, workspaceId, profile.selector)
+      buildInitConfigYaml(pageId, workspaceId, profile.selector, locale)
     )
     console.log(`\nConfig written to ${configPath}`)
     console.log("")
@@ -411,6 +436,7 @@ export async function runNoArgInit(opts: {
   name?: string
   ntnEnv?: string
   profile?: string
+  locale?: string
 }): Promise<void> {
   const cwd = process.cwd()
   const yesFlag = opts.yes === true
@@ -456,6 +482,8 @@ export async function runNoArgInit(opts: {
   }
 
   const profile = resolveInitProfile(opts.profile)
+  const locale = resolveInitLocale(opts.locale)
+  bindSchemaLocale(locale)
 
   // Resolve auth via the existing chain. No-arg init's only constraint:
   // there must be a resolvable token.
@@ -782,7 +810,7 @@ export async function runNoArgInit(opts: {
   // Write .lore.yaml.
   await writeFile(
     configPath,
-    buildInitConfigYaml(vaultPageId, auth.workspaceId, profile.selector)
+    buildInitConfigYaml(vaultPageId, auth.workspaceId, profile.selector, locale)
   )
   console.log("")
   console.log(`Config written to ${configPath}`)
@@ -818,6 +846,7 @@ interface InitOpts {
   name?: string
   ntnEnv?: string
   profile?: string
+  locale?: string
 }
 
 export const initCommand = new Command("init")
@@ -842,6 +871,10 @@ export const initCommand = new Command("init")
   .option(
     "--profile <selector>",
     "Built-in first-party profile selector to write for the new vault (exact <name>@<semver>, e.g. default@1.0.0)."
+  )
+  .option(
+    "--locale <locale>",
+    "Vault UI language for database titles and property names (en | zh-CN). Default: en. Select option values stay English."
   )
   .action(async (pageId: string | undefined, opts: InitOpts) => {
     if (pageId) {

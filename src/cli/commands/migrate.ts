@@ -31,6 +31,8 @@ import {
   runSynopsisBackfill,
 } from "./migrate/synopsis.js"
 import { runOutOfVocabTagMigration } from "./migrate/tags.js"
+import { runLocalizeMigration } from "./migrate/localize.js"
+import { parseSchemaLocale } from "../../notion/schema-locale.js"
 import {
   loadTopicAliasMerges,
   printAliasMergeResults,
@@ -150,8 +152,12 @@ export const migrateCommand = new Command("migrate")
     "Explicitly permit project-capable migrations to run vault-wide when --project is omitted; see docs/memory-workflows.md#migrating-from-unscoped-writes."
   )
   .option(
+    "--localize <locale>",
+    "Rename vault database titles and property names to a UI language (en | zh-CN). Select option values stay English. Plan-only by default — re-run with `--yes` to apply. `--dry-run` wins over apply mode. Does not change existing row values."
+  )
+  .option(
     "--yes",
-    "Execute the plan for `--merge`, `--fix-fact-encoding`, `--fix-memory-encoding`, `--normalize-agents`, `--build-entities`, `--merge-similar-topics`, `--backfill-synopses`, `--backfill-autosave-learning-source`, `--build-fact-confidence-scores`, or `--backfill-fact-observed-at`. Without `--yes`, those flags are plan-only."
+    "Execute the plan for `--merge`, `--fix-fact-encoding`, `--fix-memory-encoding`, `--normalize-agents`, `--build-entities`, `--merge-similar-topics`, `--backfill-synopses`, `--backfill-autosave-learning-source`, `--build-fact-confidence-scores`, `--backfill-fact-observed-at`, or `--localize`. Without `--yes`, those flags are plan-only."
   )
   .action(
     async (opts: {
@@ -182,6 +188,7 @@ export const migrateCommand = new Command("migrate")
       project?: string
       includeArchived?: boolean
       allowUnscoped?: boolean
+      localize?: string
     }) => {
       let buildEntitiesLock: MigrationLock | null = null
       try {
@@ -205,10 +212,11 @@ export const migrateCommand = new Command("migrate")
           !opts.backfillSynopses &&
           !opts.backfillAutosaveLearningSource &&
           !opts.buildFactConfidenceScores &&
-          !opts.backfillFactObservedAt
+          !opts.backfillFactObservedAt &&
+          !opts.localize
         ) {
           console.error(
-            "--yes only applies together with --merge, --fix-fact-encoding, --fix-memory-encoding, --normalize-agents, --build-entities, --merge-similar-topics, --backfill-synopses, --backfill-autosave-learning-source, --build-fact-confidence-scores, or --backfill-fact-observed-at."
+            "--yes only applies together with --merge, --fix-fact-encoding, --fix-memory-encoding, --normalize-agents, --build-entities, --merge-similar-topics, --backfill-synopses, --backfill-autosave-learning-source, --build-fact-confidence-scores, --backfill-fact-observed-at, or --localize."
           )
           process.exit(1)
         }
@@ -254,6 +262,16 @@ export const migrateCommand = new Command("migrate")
         }
         const synopsisBackend = parseSynopsisBackend(opts.synopsisBackend)
         const synopsisBatchSize: number = parseSynopsisBatchSize(opts.synopsisBatchSize)
+        let localizeTarget: ReturnType<typeof parseSchemaLocale> | undefined
+        if (opts.localize !== undefined) {
+          try {
+            localizeTarget = parseSchemaLocale(opts.localize)
+          } catch (err) {
+            console.error(err instanceof Error ? err.message : String(err))
+            process.exit(1)
+            return
+          }
+        }
         const factConfidenceAuditOnly = isFactConfidenceAuditOnly(opts)
         const schemaDryRun = opts.dryRun || factConfidenceAuditOnly
 
@@ -442,6 +460,14 @@ export const migrateCommand = new Command("migrate")
           })
         }
 
+        if (localizeTarget) {
+          await runLocalizeMigration(services, {
+            target: localizeTarget,
+            apply: Boolean(opts.yes) && !opts.dryRun,
+            dryRun: opts.dryRun,
+          })
+        }
+
         if (opts.backfillFactObservedAt) {
           await runBackfillFactObservedAt(services, {
             apply: Boolean(opts.yes) && !opts.dryRun,
@@ -511,7 +537,8 @@ export const migrateCommand = new Command("migrate")
             opts.backfillAutosaveLearningSource ||
             opts.buildFactConfidenceScores ||
             opts.auditFactConfidence ||
-            opts.backfillFactObservedAt
+            opts.backfillFactObservedAt ||
+            opts.localize
           if (flagHints.length > 0) {
             console.log(
               `\nDry run — no changes written. Re-run without --dry-run and with ${flagHints.join(" and ")} to apply.`
@@ -564,6 +591,7 @@ export function isFactConfidenceAuditOnly(opts: {
   backfillAutosaveLearningSource?: boolean
   buildFactConfidenceScores?: boolean
   backfillFactObservedAt?: boolean
+  localize?: string
 }): boolean {
   if (!opts.auditFactConfidence) return false
   return !(
@@ -584,6 +612,7 @@ export function isFactConfidenceAuditOnly(opts: {
     opts.backfillSynopses ||
     opts.backfillAutosaveLearningSource ||
     opts.buildFactConfidenceScores ||
-    opts.backfillFactObservedAt
+    opts.backfillFactObservedAt ||
+    opts.localize
   )
 }

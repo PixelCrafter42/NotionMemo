@@ -11,6 +11,13 @@ log is the canonical source for those.
 
 ## [Unreleased]
 
+### Added
+
+- Optional Chinese vault UI: `lore init --locale zh-CN` creates Chinese
+  database titles and property names; `lore migrate --localize zh-CN` renames
+  an existing English vault (plan-only by default, `--yes` applies). Select
+  option values stay English. A Chinese README is at `README.zh-CN.md`.
+
 ## [1.0.0] - 2026-08-04
 
 ### Changed

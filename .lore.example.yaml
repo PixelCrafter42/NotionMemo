@@ -12,6 +12,11 @@ vault:
   # angle-bracket placeholder is rejected at config load.
   pageId: "<your-vault-page-id>"
 
+# Vault UI language for newly created database titles and property
+# names (`en` or `zh-CN`). Existing vaults keep the language they
+# were created with; load-time detection wins over this field.
+# locale: zh-CN
+
 # Profile selector. Omit to use the runtime default in memory; new
 # `lore init` configs write this explicitly.
 profile: default@1.0.0

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it } from "vitest"
+import { resetSchemaLocale } from "./schema-locale.js"
 import {
   buildEntityProps,
   buildFactProps,
@@ -17,6 +18,10 @@ import {
   topicsProperties,
 } from "./schema.js"
 import { resolveProfileFromConfig } from "../profile/index.js"
+
+beforeEach(() => {
+  resetSchemaLocale()
+})
 
 describe("schema factories — profile overlays", () => {
   it("uses the default profile taxonomy for Notion select options", () => {

@@ -288,6 +288,27 @@ describe("buildInitConfigYaml", () => {
       profile: "support@1.0.0",
     })
   })
+
+  it("omits locale from a default English init config", () => {
+    const text = buildInitConfigYaml("abc123")
+    const parsed = yamlParse(text) as { locale?: string }
+    expect(parsed.locale).toBeUndefined()
+    expect(text).not.toContain("locale:")
+  })
+
+  it("writes locale: zh-CN when the Chinese vault UI is requested", () => {
+    const text = buildInitConfigYaml(
+      "abc123",
+      undefined,
+      defaultProfileSelector(),
+      "zh-CN"
+    )
+    const parsed = yamlParse(text)
+    expect(parsed).toMatchObject({
+      vault: { pageId: "abc123" },
+      locale: "zh-CN",
+    })
+  })
 })
 
 describe("buildHookDisclosureLines", () => {

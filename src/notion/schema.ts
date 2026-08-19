@@ -2,7 +2,9 @@
  * Notion database property schemas for Lore's five databases.
  *
  * These definitions are used by setup.ts to create databases and by
- * core operations to read/write property values.
+ * core operations to read/write property values. Property *keys* are
+ * stable TypeScript identifiers; the Notion-facing *names* follow the
+ * active vault UI locale.
  */
 
 import type { CreatePageParameters } from "@notionhq/client"
@@ -12,6 +14,47 @@ import {
   type ResolvedProfile,
   type ResolvedProfileSchema,
 } from "../profile/index.js"
+import {
+  ENTITY_PROPS,
+  FACT_PROPS,
+  MEMORY_PROPS,
+  PROJECT_PROPS,
+  TOPIC_PROPS,
+} from "./schema-locale.js"
+
+export {
+  bindSchemaLocale,
+  resetSchemaLocale,
+  activeSchemaLocale,
+  parseSchemaLocale,
+  isSchemaLocale,
+  SCHEMA_LOCALES,
+  DEFAULT_SCHEMA_LOCALE,
+  DB_TITLE_ALIASES,
+  DB_TITLES_EN,
+  DB_TITLES_ZH,
+  PROJECT_PROPS,
+  PROJECT_PROPS_EN,
+  PROJECT_PROPS_ZH,
+  PROJECTS_DB_TITLE,
+  TOPIC_PROPS,
+  TOPIC_PROPS_EN,
+  TOPIC_PROPS_ZH,
+  TOPICS_DB_TITLE,
+  MEMORY_PROPS,
+  MEMORY_PROPS_EN,
+  MEMORY_PROPS_ZH,
+  MEMORIES_DB_TITLE,
+  ENTITY_PROPS,
+  ENTITY_PROPS_EN,
+  ENTITY_PROPS_ZH,
+  ENTITIES_DB_TITLE,
+  FACT_PROPS,
+  FACT_PROPS_EN,
+  FACT_PROPS_ZH,
+  FACTS_DB_TITLE,
+} from "./schema-locale.js"
+export type { SchemaLocale } from "./schema-locale.js"
 
 // ---------------------------------------------------------------------------
 // Shared types for convenience
@@ -46,23 +89,7 @@ function taxonomyOptions(
 // Projects Database
 // ---------------------------------------------------------------------------
 
-export const PROJECTS_DB_TITLE = "Projects"
 export const PROJECTS_DB_ICON = "🗂️"
-
-/**
- * Notion property names for the Projects DB. The single source of truth for
- * every read and write on this database. Renaming Notion properties
- * is forbidden; centralizing the names here turns that social rule
- * into a compile-time invariant — a future rename touches one
- * declaration and TypeScript surfaces every drifted call site.
- */
-export const PROJECT_PROPS = {
-  NAME: "Name",
-  TYPE: "Type",
-  PATH: "Path",
-  STATUS: "Status",
-  DESCRIPTION: "Description",
-} as const
 
 export function projectsProperties(profile?: ProfileArg): PropertyConfig {
   return withProfileAdditions(
@@ -97,15 +124,7 @@ export function projectsProperties(profile?: ProfileArg): PropertyConfig {
 // Topics Database
 // ---------------------------------------------------------------------------
 
-export const TOPICS_DB_TITLE = "Topics"
 export const TOPICS_DB_ICON = "📑"
-
-/** Notion property names for the Topics DB. See `PROJECT_PROPS` doc. */
-export const TOPIC_PROPS = {
-  NAME: "Name",
-  PROJECT: "Project",
-  DESCRIPTION: "Description",
-} as const
 
 export function topicsProperties(
   projectsDbId: string,
@@ -134,69 +153,7 @@ export function topicsProperties(
 // Memories Database
 // ---------------------------------------------------------------------------
 
-export const MEMORIES_DB_TITLE = "Memories"
 export const MEMORIES_DB_ICON = "🧠"
-
-/** Notion property names for the Memories DB. See `PROJECT_PROPS` doc. */
-export const MEMORY_PROPS = {
-  TITLE: "Title",
-  PROJECT: "Project",
-  TOPIC: "Topic",
-  SOURCE: "Source",
-  KIND: "Kind",
-  TASK_STATE: "Task State",
-  BLOCKED_BY: "Blocked By",
-  ENTITY: "Entity",
-  STATUS: "Status",
-  CONFIDENCE: "Confidence",
-  CONFIDENCE_SCORE: "Confidence Score",
-  TOPIC_KEY: "Topic Key",
-  REVISION_COUNT: "Revision Count",
-  COMPARE_NOTES: "Compare Notes",
-  PROMOTION_SOURCE_KEY: "Promotion Source Key",
-  REVIEW_BY: "Review By",
-  DONE_AT: "Done At",
-  DECIDED_AT: "Decided At",
-  LAST_REFERENCED_AT: "Last Referenced At",
-  ALTERNATIVES: "Alternatives",
-  CONSEQUENCES: "Consequences",
-  AUTHOR: "Author",
-  AGENT: "Agent",
-  TAGS: "Tags",
-  KEYWORDS: "Keywords",
-  SYNOPSIS: "Synopsis",
-  EXPIRES_ON: "Expires On",
-  SESSION: "Session",
-  SUPERSEDES: "Supersedes",
-  AFFECTS: "Affects",
-  COMPARED_WITH: "Compared With",
-  // Scope / lifetime. Five columns added together so a
-  // schema-drift caller sees the whole feature land or none of it.
-  // `Scope Kind` and `Lifetime` are select columns whose options match
-  // the `MEMORY_SCOPE_KINDS` / `MEMORY_LIFETIMES` enums. `Scope Key`
-  // and `Audience` are free-form rich_text
-  // (scope keys are session ids, agent canonical names, role labels —
-  // a closed select would force a schema migration on every new
-  // session). `Expires At` is a Notion `date` so the retrieval filter
-  // can use `on_or_after` semantics without parsing.
-  SCOPE_KIND: "Scope Kind",
-  SCOPE_KEY: "Scope Key",
-  AUDIENCE: "Audience",
-  LIFETIME: "Lifetime",
-  EXPIRES_AT: "Expires At",
-  // Pinned context blocks. Three columns added together
-  // so a schema-drift caller sees the whole feature land or none of
-  // it — same posture as the scope/lifetime cluster above.
-  // `Pinned` discriminates pinned blocks from normal memories;
-  // `Pinned Priority` orders them in the wake-up Pinned Context
-  // section (higher first); `Mutability` enforces the read-only
-  // contract. Audience targeting reuses the existing
-  // `Audience` rich_text column — pinned blocks ride
-  // atop the same audience plumbing rather than duplicating it.
-  PINNED: "Pinned",
-  PINNED_PRIORITY: "Pinned Priority",
-  MUTABILITY: "Mutability",
-} as const
 
 /**
  * Build Memories DB property config.
@@ -476,19 +433,7 @@ export function memoriesSelfRelationProperties(memoriesDsId: string): PropertyCo
 // Entities Database (PF3-01 — canonical entity registry)
 // ---------------------------------------------------------------------------
 
-export const ENTITIES_DB_TITLE = "Entities"
 export const ENTITIES_DB_ICON = "🪪"
-
-/** Notion property names for the Entities DB. See `PROJECT_PROPS` doc. */
-export const ENTITY_PROPS = {
-  NAME: "Name",
-  ALIASES: "Aliases",
-  KIND: "Kind",
-  DESCRIPTION: "Description",
-  PROJECT: "Project",
-  SOURCE: "Source",
-} as const
-
 /**
  * `Aliases` is a single rich_text cell holding a comma-separated list
  * rather than a `multi_select`. Multi-select option lists require a
@@ -562,50 +507,7 @@ export function entitiesProperties(
 // Facts Database (Knowledge Graph)
 // ---------------------------------------------------------------------------
 
-export const FACTS_DB_TITLE = "Facts"
 export const FACTS_DB_ICON = "🔗"
-
-/** Notion property names for the Facts DB. See `PROJECT_PROPS` doc. */
-export const FACT_PROPS = {
-  SUBJECT: "Subject",
-  PREDICATE: "Predicate",
-  OBJECT: "Object",
-  PROJECT: "Project",
-  SOURCE: "Source",
-  CONFIDENCE: "Confidence",
-  CONFIDENCE_SCORE: "Confidence Score",
-  VALID_FROM: "Valid From",
-  VALID_UNTIL: "Valid Until",
-  // Transaction-time provenance. `Valid From` / `Valid Until`
-  // model domain truth (when the fact was true in the world); `Observed At`
-  // and `Invalidated At` model what Lore knew and when. Together they
-  // implement the bitemporal axis used for as-of recall.
-  // `Observed At` is written by `FactService.create` at write time;
-  // `Invalidated At` is written by `FactService.invalidate` alongside the
-  // existing `Valid Until` flip so a single atomic update carries both
-  // signals. `Invalidated By` points at the source memory that prompted
-  // the invalidation — distinct from `Source` (the supporting memory at
-  // creation time).
-  OBSERVED_AT: "Observed At",
-  INVALIDATED_AT: "Invalidated At",
-  INVALIDATED_BY: "Invalidated By",
-  REVIEW_BY: "Review By",
-  LAST_REFERENCED_AT: "Last Referenced At",
-  DEDUP_KEY: "DedupKey",
-  SUBJECT_KEY: "SubjectKey",
-  SUBJECT_ENTITY: "SubjectEntity",
-  OBJECT_ENTITY: "ObjectEntity",
-  // Scope / lifetime. Mirrors the Memories DB columns so
-  // facts about a session-scoped piece of work can carry the same
-  // identity slot — `lore-fact action='create'` accepts a scope bundle
-  // that matches the source memory's scope.
-  SCOPE_KIND: "Scope Kind",
-  SCOPE_KEY: "Scope Key",
-  AUDIENCE: "Audience",
-  LIFETIME: "Lifetime",
-  EXPIRES_AT: "Expires At",
-} as const
-
 /**
  * Build the Facts DB property config. The Entities DB is part of the
  * supported vault shape, so the canonical relation columns are always in

@@ -12,8 +12,19 @@ Default schema migration:
   `dataSources.update`.
 - Detects missing select and multi-select options while preserving live option
   IDs so Notion does not duplicate options.
-- Performs additive changes only; property renames or removals are breaking and
-  require an explicit architectural decision.
+- Performs additive changes only; property renames or removals are breaking
+  except for the explicit `--localize` path below.
+
+Vault UI localization:
+
+- `--localize zh-CN` / `--localize en` renames database titles and property
+  names to the requested UI language. Select option values stay English.
+- Plan-only by default; `--yes` applies. `--dry-run` wins over apply mode.
+- Idempotent: a vault already in the target language reports no writes.
+- Custom-renamed database titles are left untouched; properties still rename
+  when the English/Chinese pair is present.
+- Load-time schema detection binds the active property-name locale from the
+  live vault so later reads and writes use the names that actually exist.
 
 Legacy tag upgrade:
 
