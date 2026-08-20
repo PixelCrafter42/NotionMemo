@@ -128,6 +128,7 @@ const configSchema = z.object({
   vault: z.object({
     pageId: pageIdSchema("vault.pageId is required"),
   }),
+  locale: z.enum(["en", "zh-CN"]).optional(),
   profile: profileSelectorSchema.optional(),
   profiles: profilesConfigSchema,
   features: featuresConfigSchema,

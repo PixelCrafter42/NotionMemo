@@ -10,11 +10,6 @@ import type { BlockObjectResponse } from "@notionhq/client"
 import type { DatabaseRef, Vault, VaultDatabases } from "../types.js"
 import { resolveProfileFromConfig, type ResolvedProfile } from "../profile/index.js"
 import {
-  ENTITY_PROPS,
-  FACT_PROPS,
-  MEMORY_PROPS,
-  PROJECT_PROPS,
-  TOPIC_PROPS,
   PROJECTS_DB_TITLE,
   PROJECTS_DB_ICON,
   projectsProperties,
@@ -32,6 +27,18 @@ import {
   FACTS_DB_ICON,
   factsProperties,
 } from "./schema.js"
+import {
+  DB_TITLE_ALIASES,
+  DB_TITLES_EN,
+  bindSchemaLocale,
+  detectSchemaLocaleFromPropertySets,
+  entityPropsFor,
+  factPropsFor,
+  memoryPropsFor,
+  projectPropsFor,
+  topicPropsFor,
+  type SchemaLocale,
+} from "./schema-locale.js"
 import { throwIfNotionErrorEnvelope } from "./client.js"
 
 // The SDK expects InitialDataSourceRequest.properties typed as
@@ -52,11 +59,11 @@ const MAX_VAULT_CHILD_BLOCK_PAGES = 100
 const SELECT_OPTIONS_MAX = 100
 
 const EXPECTED_VAULT_TITLES: VaultDatabaseTitles = {
-  projects: PROJECTS_DB_TITLE,
-  topics: TOPICS_DB_TITLE,
-  memories: MEMORIES_DB_TITLE,
-  entities: ENTITIES_DB_TITLE,
-  facts: FACTS_DB_TITLE,
+  projects: DB_TITLES_EN.projects,
+  topics: DB_TITLES_EN.topics,
+  memories: DB_TITLES_EN.memories,
+  entities: DB_TITLES_EN.entities,
+  facts: DB_TITLES_EN.facts,
 }
 
 const REQUIRED_VAULT_DATABASE_KEYS: VaultDatabaseKey[] = [
@@ -87,43 +94,60 @@ const PROPERTY_TYPES = [
 type PropertyType = (typeof PROPERTY_TYPES)[number]
 type SchemaFingerprint = Record<string, PropertyType>
 
-const VAULT_DATABASE_FINGERPRINTS: Record<VaultDatabaseKey, SchemaFingerprint> = {
-  projects: {
-    [PROJECT_PROPS.NAME]: "title",
-    [PROJECT_PROPS.TYPE]: "select",
-    [PROJECT_PROPS.PATH]: "rich_text",
-    [PROJECT_PROPS.STATUS]: "select",
-  },
-  topics: {
-    [TOPIC_PROPS.NAME]: "title",
-    [TOPIC_PROPS.PROJECT]: "relation",
-    [TOPIC_PROPS.DESCRIPTION]: "rich_text",
-  },
-  memories: {
-    [MEMORY_PROPS.TITLE]: "title",
-    [MEMORY_PROPS.PROJECT]: "relation",
-    [MEMORY_PROPS.TOPIC]: "relation",
-    [MEMORY_PROPS.SOURCE]: "select",
-    [MEMORY_PROPS.KIND]: "select",
-    [MEMORY_PROPS.TAGS]: "multi_select",
-    [MEMORY_PROPS.SESSION]: "rich_text",
-  },
-  entities: {
-    [ENTITY_PROPS.NAME]: "title",
-    [ENTITY_PROPS.ALIASES]: "rich_text",
-    [ENTITY_PROPS.KIND]: "select",
-    [ENTITY_PROPS.DESCRIPTION]: "rich_text",
-    [ENTITY_PROPS.PROJECT]: "relation",
-    [ENTITY_PROPS.SOURCE]: "relation",
-  },
-  facts: {
-    [FACT_PROPS.SUBJECT]: "title",
-    [FACT_PROPS.PREDICATE]: "select",
-    [FACT_PROPS.OBJECT]: "rich_text",
-    [FACT_PROPS.PROJECT]: "relation",
-    [FACT_PROPS.SOURCE]: "relation",
-    [FACT_PROPS.CONFIDENCE]: "select",
-  },
+function vaultDatabaseFingerprints(
+  locale: SchemaLocale
+): Record<VaultDatabaseKey, SchemaFingerprint> {
+  const project = projectPropsFor(locale)
+  const topic = topicPropsFor(locale)
+  const memory = memoryPropsFor(locale)
+  const entity = entityPropsFor(locale)
+  const fact = factPropsFor(locale)
+  return {
+    projects: {
+      [project.NAME]: "title",
+      [project.TYPE]: "select",
+      [project.PATH]: "rich_text",
+      [project.STATUS]: "select",
+    },
+    topics: {
+      [topic.NAME]: "title",
+      [topic.PROJECT]: "relation",
+      [topic.DESCRIPTION]: "rich_text",
+    },
+    memories: {
+      [memory.TITLE]: "title",
+      [memory.PROJECT]: "relation",
+      [memory.TOPIC]: "relation",
+      [memory.SOURCE]: "select",
+      [memory.KIND]: "select",
+      [memory.TAGS]: "multi_select",
+      [memory.SESSION]: "rich_text",
+    },
+    entities: {
+      [entity.NAME]: "title",
+      [entity.ALIASES]: "rich_text",
+      [entity.KIND]: "select",
+      [entity.DESCRIPTION]: "rich_text",
+      [entity.PROJECT]: "relation",
+      [entity.SOURCE]: "relation",
+    },
+    facts: {
+      [fact.SUBJECT]: "title",
+      [fact.PREDICATE]: "select",
+      [fact.OBJECT]: "rich_text",
+      [fact.PROJECT]: "relation",
+      [fact.SOURCE]: "relation",
+      [fact.CONFIDENCE]: "select",
+    },
+  }
+}
+
+const VAULT_DATABASE_FINGERPRINTS_BY_LOCALE: Record<
+  SchemaLocale,
+  Record<VaultDatabaseKey, SchemaFingerprint>
+> = {
+  en: vaultDatabaseFingerprints("en"),
+  "zh-CN": vaultDatabaseFingerprints("zh-CN"),
 }
 
 export class MissingVaultDatabasesError extends Error {
@@ -206,10 +230,15 @@ function matchesSchemaFingerprint(
 function identifyVaultDatabaseBySchema(
   properties: Record<string, unknown>
 ): VaultDatabaseKey | null {
-  const matches = (Object.keys(VAULT_DATABASE_FINGERPRINTS) as VaultDatabaseKey[]).filter(
-    (key) => matchesSchemaFingerprint(properties, VAULT_DATABASE_FINGERPRINTS[key])
-  )
-  return matches.length === 1 ? matches[0] : null
+  const matches = new Set<VaultDatabaseKey>()
+  for (const fingerprints of Object.values(VAULT_DATABASE_FINGERPRINTS_BY_LOCALE)) {
+    for (const key of Object.keys(fingerprints) as VaultDatabaseKey[]) {
+      if (matchesSchemaFingerprint(properties, fingerprints[key])) {
+        matches.add(key)
+      }
+    }
+  }
+  return matches.size === 1 ? [...matches][0] : null
 }
 
 function createDbArgs(
@@ -894,8 +923,8 @@ async function resolveVaultDatabases(
 
       const title = fullBlock.child_database.title
       childDatabases.push({ id: fullBlock.id, title })
-      for (const [key, expectedTitle] of Object.entries(EXPECTED_VAULT_TITLES)) {
-        if (title === expectedTitle) {
+      for (const [key, aliases] of Object.entries(DB_TITLE_ALIASES)) {
+        if (aliases.includes(title)) {
           dbBlockIds[key as keyof VaultDatabases] = fullBlock.id
         }
       }
@@ -964,6 +993,12 @@ async function resolveVaultDatabases(
   for (const [key, ref] of retrieved) {
     resolved[key] = ref
   }
+
+  const propertySets = entries.map(([, dbId]) => {
+    const record = databaseRecords.get(dbId)
+    return (record?.["properties"] ?? undefined) as Record<string, unknown> | undefined
+  })
+  bindSchemaLocale(detectSchemaLocaleFromPropertySets(propertySets))
 
   return {
     pageId,

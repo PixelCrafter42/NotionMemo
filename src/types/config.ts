@@ -173,6 +173,14 @@ export interface LoreConfig {
     pageId: string
   }
   /**
+   * Vault UI language for newly created database titles and property names.
+   * Existing vaults keep the language they were created with; detection at
+   * load time wins over this field. Use `lore init --locale zh-CN` for a
+   * new Chinese vault, or `lore migrate --localize zh-CN` to rename an
+   * existing English vault.
+   */
+  locale?: "en" | "zh-CN"
+  /**
    * Exact profile selector (`<name>@<semver>`). Omitted legacy configs
    * resolve in memory to the bundled default profile; read-only starts
    * never write this field back to disk.

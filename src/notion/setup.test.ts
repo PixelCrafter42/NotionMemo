@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
+import { activeSchemaLocale, DB_TITLES_ZH, resetSchemaLocale } from "./schema-locale.js"
 import type { Client } from "@notionhq/client"
 import type { Vault } from "../types.js"
 import {
@@ -559,6 +560,10 @@ function makeStartupStub({
   }
 }
 
+afterEach(() => {
+  resetSchemaLocale()
+})
+
 describe("verifyVaultDatabases child block pagination", () => {
   function childDatabaseBlocks(
     childDatabases: Array<{ id: string; title: string }>
@@ -629,6 +634,29 @@ describe("verifyVaultDatabases child block pagination", () => {
       databaseId: "block-entities",
       dataSourceId: "ds-block-entities",
     })
+  })
+
+  it("matches Chinese vault database titles and binds zh-CN", async () => {
+    const childDatabases = [
+      { id: "block-projects", title: DB_TITLES_ZH.projects },
+      { id: "block-topics", title: DB_TITLES_ZH.topics },
+      { id: "block-memories", title: DB_TITLES_ZH.memories },
+      { id: "block-entities", title: DB_TITLES_ZH.entities },
+      { id: "block-facts", title: DB_TITLES_ZH.facts },
+    ]
+    const { client } = makeStartupStub({
+      childDatabases,
+      databaseProperties: {
+        "block-projects": props({ 名称: "title", 路径: "rich_text" }),
+      },
+      liveProperties: {},
+      retrieveDelayMs: 0,
+    })
+
+    const vault = await verifyVaultDatabases(client, "page-1")
+    expect(vault.databases.projects.databaseId).toBe("block-projects")
+    expect(vault.databases.facts.databaseId).toBe("block-facts")
+    expect(activeSchemaLocale()).toBe("zh-CN")
   })
 
   it("detects a renamed Lore database by schema fingerprint", async () => {

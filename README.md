@@ -1,3 +1,5 @@
+**Language / 语言:** [English](README.md) | [简体中文](README.zh-CN.md)
+
 # Lore
 
 AI memory backed by Notion.
@@ -188,10 +190,15 @@ auth source can write to it, then run:
 
 ```bash
 lore init <page-id>
+# Chinese database titles and property names:
+# lore init <page-id> --locale zh-CN
 ```
 
 That command creates the five databases inside the page (Projects, Topics,
-Memories, Entities, Facts) and writes your local `.lore.yaml`. Operators who
+Memories, Entities, Facts) and writes your local `.lore.yaml`. Pass
+`--locale zh-CN` to create Chinese column names; existing English vaults can
+be renamed with `lore migrate --localize zh-CN`. See
+[`README.zh-CN.md`](README.zh-CN.md). Operators who
 join the initialized vault later should use step 2 instead of running
 initialization again.
 
