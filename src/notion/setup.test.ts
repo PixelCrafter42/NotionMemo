@@ -13,11 +13,13 @@ import {
 } from "./setup.js"
 import {
   ENTITIES_DB_TITLE,
+  FACT_PROPS,
   FACTS_DB_TITLE,
   MEMORY_PROPS,
   MEMORIES_DB_TITLE,
   PROJECTS_DB_TITLE,
   TOPICS_DB_TITLE,
+  buildMemoryProps,
   entitiesProperties,
   factsProperties,
   memoriesProperties,
@@ -434,13 +436,11 @@ type StartupChildBlockPage = {
 function makeStartupStub({
   childDatabases,
   childBlockPages,
-  databaseProperties,
   liveProperties,
   retrieveDelayMs = 10,
 }: {
   childDatabases: Array<{ id: string; title: string }>
   childBlockPages?: StartupChildBlockPage[]
-  databaseProperties?: Record<string, Record<string, unknown>>
   liveProperties: Record<string, Record<string, unknown>>
   retrieveDelayMs?: number
 }): {
@@ -524,7 +524,6 @@ function makeStartupStub({
         return track({
           id: args.database_id,
           data_sources: [{ id: `ds-${args.database_id}` }],
-          properties: databaseProperties?.[args.database_id] ?? {},
         })
       },
       create: async (args: unknown) => {
@@ -582,7 +581,7 @@ describe("verifyVaultDatabases child block pagination", () => {
     }))
   }
 
-  function props(types: Record<string, string>): Record<string, unknown> {
+  function props(types: Record<string, string>): Record<string, Record<string, unknown>> {
     return Object.fromEntries(
       Object.entries(types).map(([name, type]) => [name, { type, [type]: {} }])
     )
@@ -644,12 +643,9 @@ describe("verifyVaultDatabases child block pagination", () => {
       { id: "block-entities", title: DB_TITLES_ZH.entities },
       { id: "block-facts", title: DB_TITLES_ZH.facts },
     ]
-    const { client } = makeStartupStub({
+    const { client, dataSourcesRetrieveCalls } = makeStartupStub({
       childDatabases,
-      databaseProperties: {
-        "block-projects": props({ 名称: "title", 路径: "rich_text" }),
-      },
-      liveProperties: {},
+      liveProperties: props({ 名称: "title", 路径: "rich_text" }),
       retrieveDelayMs: 0,
     })
 
@@ -657,6 +653,23 @@ describe("verifyVaultDatabases child block pagination", () => {
     expect(vault.databases.projects.databaseId).toBe("block-projects")
     expect(vault.databases.facts.databaseId).toBe("block-facts")
     expect(activeSchemaLocale()).toBe("zh-CN")
+    expect(dataSourcesRetrieveCalls()).toContain("ds-block-projects")
+    expect(MEMORY_PROPS.TITLE).toBe("标题")
+    expect(FACT_PROPS.VALID_UNTIL).toBe("生效至")
+
+    const memoryProps = buildMemoryProps({
+      title: "中文字段读写验证",
+      source: "manual",
+      kind: "note",
+      keywords: "schema-locale",
+      synopsis: "运行时属性名使用中文。",
+    })
+    expect(memoryProps).toHaveProperty("标题")
+    expect(memoryProps).toHaveProperty("来源")
+    expect(memoryProps).toHaveProperty("种类")
+    expect(memoryProps).toHaveProperty("关键词")
+    expect(memoryProps).toHaveProperty("摘要")
+    expect(memoryProps).not.toHaveProperty("Title")
   })
 
   it("detects a renamed Lore database by schema fingerprint", async () => {
@@ -669,10 +682,7 @@ describe("verifyVaultDatabases child block pagination", () => {
     ]
     const { client, databasesRetrieveCalls } = makeStartupStub({
       childDatabases,
-      databaseProperties: {
-        "block-memories": memoriesFingerprint,
-      },
-      liveProperties: {},
+      liveProperties: memoriesFingerprint,
       retrieveDelayMs: 0,
     })
 
@@ -690,10 +700,7 @@ describe("verifyVaultDatabases child block pagination", () => {
   it("treats renamed Lore databases as present when refusing partial init", async () => {
     const { client } = makeStartupStub({
       childDatabases: [{ id: "block-memories", title: "Memory" }],
-      databaseProperties: {
-        "block-memories": memoriesFingerprint,
-      },
-      liveProperties: {},
+      liveProperties: memoriesFingerprint,
       retrieveDelayMs: 0,
     })
 

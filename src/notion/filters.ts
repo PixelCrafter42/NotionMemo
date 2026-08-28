@@ -55,21 +55,33 @@ export interface DefaultScopeFilterOptions {
 }
 
 /**
- * Property snapshot for the Memories DB. Mirrors the
- * `MEMORY_PROPS.{SCOPE_KIND,SCOPE_KEY,EXPIRES_AT}` constants. Bundle
- * exported for callers that build a filter against the Memories DB.
+ * Live property view for the Memories DB. Getters keep callers aligned
+ * when `bindSchemaLocale()` switches the active vault language after
+ * modules have already loaded.
  */
 export const MEMORY_SCOPE_PROPS: ScopeFilterProps = {
-  scopeKind: MEMORY_PROPS.SCOPE_KIND,
-  scopeKey: MEMORY_PROPS.SCOPE_KEY,
-  expiresAt: MEMORY_PROPS.EXPIRES_AT,
+  get scopeKind() {
+    return MEMORY_PROPS.SCOPE_KIND
+  },
+  get scopeKey() {
+    return MEMORY_PROPS.SCOPE_KEY
+  },
+  get expiresAt() {
+    return MEMORY_PROPS.EXPIRES_AT
+  },
 }
 
 /** Mirror for the Facts DB. */
 export const FACT_SCOPE_PROPS: ScopeFilterProps = {
-  scopeKind: FACT_PROPS.SCOPE_KIND,
-  scopeKey: FACT_PROPS.SCOPE_KEY,
-  expiresAt: FACT_PROPS.EXPIRES_AT,
+  get scopeKind() {
+    return FACT_PROPS.SCOPE_KIND
+  },
+  get scopeKey() {
+    return FACT_PROPS.SCOPE_KEY
+  },
+  get expiresAt() {
+    return FACT_PROPS.EXPIRES_AT
+  },
 }
 
 /**

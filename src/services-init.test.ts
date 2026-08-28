@@ -16,6 +16,7 @@ vi.mock("./config.js", async (importOriginal) => {
 vi.mock("./notion/client.js", () => ({
   createAuthRefreshingClient: vi.fn(),
   createClient: vi.fn(),
+  throwIfNotionErrorEnvelope: vi.fn(),
 }))
 
 vi.mock("./notion/rate-limit.js", () => ({

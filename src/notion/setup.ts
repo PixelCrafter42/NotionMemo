@@ -610,11 +610,16 @@ interface SchemaPropertyWrite {
 
 async function retrieveDataSourceProperties(
   client: Client,
-  dataSourceId: string
+  dataSourceId: string,
+  cache?: Map<string, Record<string, unknown>>
 ): Promise<Record<string, unknown>> {
+  const cached = cache?.get(dataSourceId)
+  if (cached) return cached
   const live = await client.dataSources.retrieve({ data_source_id: dataSourceId })
   throwIfNotionErrorEnvelope(live)
-  return (live as { properties: Record<string, unknown> }).properties
+  const properties = (live as { properties: Record<string, unknown> }).properties
+  cache?.set(dataSourceId, properties)
+  return properties
 }
 
 async function updateDataSourceProperty(
@@ -898,6 +903,7 @@ async function resolveVaultDatabases(
 ): Promise<VaultWithOptionalEntities> {
   const dbBlockIds: Partial<Record<keyof VaultDatabases, string>> = {}
   const databaseRecords = new Map<string, Record<string, unknown>>()
+  const dataSourceProperties = new Map<string, Record<string, unknown>>()
   const childDatabases: Array<{ id: string; title: string }> = []
 
   let cursor: string | undefined
@@ -955,7 +961,12 @@ async function resolveVaultDatabases(
     await Promise.all(
       candidates.map(async (db) => {
         const record = await retrieveDatabaseRecord(client, db.id, databaseRecords)
-        const properties = (record["properties"] ?? {}) as Record<string, unknown>
+        const ref = getDatabaseRef(record, db.id)
+        const properties = await retrieveDataSourceProperties(
+          client,
+          ref.dataSourceId,
+          dataSourceProperties
+        )
         const key = identifyVaultDatabaseBySchema(properties)
         if (!key || dbBlockIds[key]) return
         dbBlockIds[key] = db.id
@@ -994,10 +1005,11 @@ async function resolveVaultDatabases(
     resolved[key] = ref
   }
 
-  const propertySets = entries.map(([, dbId]) => {
-    const record = databaseRecords.get(dbId)
-    return (record?.["properties"] ?? undefined) as Record<string, unknown> | undefined
-  })
+  const propertySets = await Promise.all(
+    retrieved.map(([, ref]) =>
+      retrieveDataSourceProperties(client, ref.dataSourceId, dataSourceProperties)
+    )
+  )
   bindSchemaLocale(detectSchemaLocaleFromPropertySets(propertySets))
 
   return {
