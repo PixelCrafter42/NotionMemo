@@ -8,15 +8,25 @@
  * refactor cannot silently widen recall.
  */
 
-import { describe, expect, it } from "vitest"
-import { FACT_PROPS, MEMORY_PROPS } from "./schema.js"
+import { afterEach, describe, expect, it } from "vitest"
+import {
+  bindSchemaLocale,
+  FACT_PROPS,
+  MEMORY_PROPS,
+  resetSchemaLocale,
+} from "./schema.js"
 import {
   defaultScopeInclusionFilter,
   expiringWithinFilter,
   expiredBeforeFilter,
   withDefaultScopeFilter,
   FACT_SCOPE_PROPS,
+  MEMORY_SCOPE_PROPS,
 } from "./filters.js"
+
+afterEach(() => {
+  resetSchemaLocale()
+})
 
 describe("defaultScopeInclusionFilter", () => {
   it("emits scopeKind is_empty + the three broadcast scopes when context is empty", () => {
@@ -130,6 +140,22 @@ describe("defaultScopeInclusionFilter", () => {
       property: FACT_PROPS.EXPIRES_AT,
       date: { is_empty: true },
     })
+  })
+
+  it("reads localized scope property names after runtime locale binding", () => {
+    bindSchemaLocale("zh-CN")
+
+    expect(MEMORY_SCOPE_PROPS.scopeKind).toBe("作用域种类")
+    expect(MEMORY_SCOPE_PROPS.expiresAt).toBe("过期于")
+    expect(FACT_SCOPE_PROPS.scopeKind).toBe("作用域种类")
+    expect(FACT_SCOPE_PROPS.expiresAt).toBe("过期于")
+
+    const filter = defaultScopeInclusionFilter({}, "2026-05-04")
+    const serialized = JSON.stringify(filter)
+    expect(serialized).toContain("作用域种类")
+    expect(serialized).toContain("过期于")
+    expect(serialized).not.toContain("Scope Kind")
+    expect(serialized).not.toContain("Expires At")
   })
 
   it("returns a fresh literal on every call so caller mutations don't leak", () => {
